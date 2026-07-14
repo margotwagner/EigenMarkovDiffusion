@@ -1,0 +1,2 @@
+[console_scripts]
+eigendiffusion = eigendiffusion.cli:main

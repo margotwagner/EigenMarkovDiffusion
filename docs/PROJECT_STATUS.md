@@ -1,35 +1,23 @@
-# Project status
+# Current project status
 
-EigenDiffusion is a research prototype for replacing a spatial particle random
-walk with stochastic dynamics over diffusion eigenmodes. The current evidence
-supports the central proof of concept: the ensemble mean of the modal process
-can approximate deterministic and random-walk diffusion profiles.
+The code now distinguishes the exact continuous-time diffusion solution from
+the exact discrete-time expectation of the implemented random walk. The current
+EigenMarkov mean should be evaluated primarily against the discrete-time target,
+because both use the same first-order modal decay factor.
 
-The main unresolved scientific issue is the stochastic reconstruction. Signed,
-independently sampled modes can generate negative spatial values and do not yet
-have a demonstrated guarantee of reproducing the complete spatial covariance of
-a physical particle process. The code therefore reports negative values rather
-than clipping them.
+The main open scientific issue is stochastic structure rather than mean
+propagation. Independent two-state modal processes generally do not reproduce
+the cross-mode covariance induced by a multinomial spatial particle process.
+This appears in three diagnostics:
 
-This repository intentionally focuses on the smallest reproducible diffusion
-study:
+1. inflated or misplaced spatial variance;
+2. inaccurate same-time spatial covariance;
+3. negative reconstructed spatial counts.
 
-- the Neumann diffusion operator;
-- deterministic spectral propagation;
-- an original-style particle-by-particle random walk;
-- an exact multinomial node-count random walk;
-- the stochastic EigenMarkov model;
-- ensemble validation, random-walk benchmarking, and mode sweeps;
-- tests of conservation, operator invariants, and consistency of the two
-  random-walk formulations.
+The repository therefore reports exact multinomial variance and covariance,
+negative mass fraction, fraction of entries below zero, minimum reconstructed
+count, and mass-conservation error. No clipping or projection is applied.
 
-The naive and multinomial random walks describe the same independent-particle
-model at the node-count level. Their comparison isolates the computational gain
-from aggregation. EigenMarkov should therefore be benchmarked against both, and
-especially against the multinomial implementation as the stronger spatial
-baseline.
-
-The calcium-calbindin reaction-diffusion prototypes from the original repository
-are not included because they are not yet integrated into the stochastic modal
-model. They should return as a separate, tested module only after the diffusion
-formulation is settled.
+The next model-development step should address correlated modal noise or another
+constrained stochastic reduced-order representation. Refactoring or plotting
+changes alone cannot resolve this mathematical limitation.

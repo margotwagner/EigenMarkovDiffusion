@@ -19,7 +19,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .config import DiffusionConfig
-from .operators import eigendecompose, impulse_initial_condition, neumann_laplacian_1d
+from .references import continuous_expected_diffusion
 
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
@@ -29,28 +29,14 @@ def deterministic_diffusion(
     config: DiffusionConfig,
     n_modes: int | None = None,
 ) -> FloatArray:
-    """Compute the deterministic diffusion mean by eigenmode propagation.
+    """Backward-compatible alias for continuous expected diffusion.
 
-    Returns an array with shape ``(n_steps, n_nodes)``. With every mode
-    retained this is the exact solution of the spatially discretized linear
-    system at the requested time points.
+    New analysis code should call :func:`continuous_expected_diffusion` or
+    :func:`discrete_expected_diffusion` explicitly so the time discretization
+    of the reference is unambiguous.
     """
 
-    operator = neumann_laplacian_1d(
-        config.n_nodes,
-        config.length,
-        config.diffusion_coefficient,
-    )
-    basis = eigendecompose(operator, n_modes=n_modes)
-    initial = impulse_initial_condition(
-        config.n_nodes,
-        config.n_particles,
-        config.impulse_index,
-    )
-    modal_initial = basis.to_modal(initial)
-    decay = np.exp(-np.outer(config.times, basis.eigenvalues))
-    modal_over_time = decay * modal_initial[None, :]
-    return modal_over_time @ basis.eigenvectors.T
+    return continuous_expected_diffusion(config, n_modes=n_modes)
 
 
 def naive_random_walk_trajectories(

@@ -70,3 +70,66 @@ Retaining only the first \(M\) slow modes gives the reduced approximation
 The signed reconstruction is not guaranteed to be nonnegative. This is an
 explicitly measured limitation rather than something silently repaired by the
 implementation.
+
+## Discrete-time reference
+
+The stochastic implementations use a finite transition step
+
+\[
+P=I-\Delta t A,
+\qquad
+\mathbf n_{s+1}=P\mathbf n_s.
+\]
+
+Therefore the exact expected node counts after integer step \(s\) are
+
+\[
+\mathbb E[\mathbf n_s]=P^s\mathbf n_0.
+\]
+
+In the eigenbasis, this becomes
+
+\[
+\mathbb E[m_k(s)]
+=(1-\lambda_k\Delta t)^s m_k(0).
+\]
+
+This is distinct from the continuous solution
+\(e^{-\lambda_k s\Delta t}m_k(0)\). Their difference is a timestep effect,
+not necessarily a model failure.
+
+## Exact multinomial statistics
+
+When \(N\) independent particles begin at the same node, each particle has node
+probability vector \(\mathbf p_s\) after step \(s\). The node-count vector is
+marginally
+
+\[
+\mathbf n_s\sim\operatorname{Multinomial}(N,\mathbf p_s).
+\]
+
+Its node variances are
+
+\[
+\operatorname{Var}[n_i(s)]
+=Np_{s,i}(1-p_{s,i}),
+\]
+
+and its same-time spatial covariance is
+
+\[
+\operatorname{Cov}(\mathbf n_s)
+=N\left[\operatorname{diag}(\mathbf p_s)
+-\mathbf p_s\mathbf p_s^\top\right].
+\]
+
+Transforming to modal coordinates gives
+
+\[
+\operatorname{Cov}(\mathbf m_s)
+=V^\top\operatorname{Cov}(\mathbf n_s)V.
+\]
+
+This modal covariance is generally not diagonal. Consequently, evolving every
+mode as an independent stochastic process may reproduce the modal means while
+failing to reproduce the correct spatial variance and covariance.

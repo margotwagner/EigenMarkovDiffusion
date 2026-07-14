@@ -1,4 +1,4 @@
-"""Small plotting helpers used by the command-line examples."""
+"""Plotting helpers for validation, sweeps, and benchmarks."""
 
 from __future__ import annotations
 
@@ -15,15 +15,15 @@ FloatArray = NDArray[np.float64]
 
 def plot_validation(
     config: DiffusionConfig,
-    deterministic: FloatArray,
-    eigenmarkov_mean: FloatArray,
-    eigenmarkov_std: FloatArray,
-    random_walk_mean: FloatArray,
-    random_walk_std: FloatArray,
+    continuous_reference: FloatArray,
+    discrete_reference: FloatArray,
+    analytic_variance: FloatArray,
+    eigenmarkov_runs: FloatArray,
+    random_walk_runs: FloatArray,
     output_path: str | Path,
     profile_step: int | None = None,
 ) -> Path:
-    """Plot one spatial profile and the impulse-node time course."""
+    """Plot mean, variance, and nonnegativity diagnostics."""
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -31,51 +31,98 @@ def plot_validation(
     if not 0 <= step < config.n_steps:
         raise ValueError("profile_step must index an available timestep")
 
+    em_mean = np.mean(eigenmarkov_runs, axis=0)
+    em_std = np.std(eigenmarkov_runs, axis=0, ddof=0)
+    em_variance = np.var(eigenmarkov_runs, axis=0, ddof=0)
+    rw_mean = np.mean(random_walk_runs, axis=0)
+    rw_std = np.std(random_walk_runs, axis=0, ddof=0)
+    rw_variance = np.var(random_walk_runs, axis=0, ddof=0)
+
+    em_negative_mass = (
+        np.clip(-eigenmarkov_runs, 0.0, None).sum(axis=-1) / config.n_particles
+    )
+    rw_negative_mass = (
+        np.clip(-random_walk_runs, 0.0, None).sum(axis=-1) / config.n_particles
+    )
+
     x = config.positions
     t = config.times
     impulse = config.impulse_index
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
 
-    axes[0].plot(x, deterministic[step], label="deterministic mean", linewidth=2.2)
-    axes[0].plot(x, random_walk_mean[step], label="random-walk mean", linewidth=1.8)
-    axes[0].fill_between(
+    ax = axes[0, 0]
+    ax.plot(x, continuous_reference[step], "--", label="continuous reference", linewidth=1.8)
+    ax.plot(x, discrete_reference[step], label="discrete expected mean", linewidth=2.2)
+    ax.plot(x, rw_mean[step], label="random-walk mean", linewidth=1.8)
+    ax.fill_between(
         x,
-        random_walk_mean[step] - random_walk_std[step],
-        random_walk_mean[step] + random_walk_std[step],
-        alpha=0.18,
+        rw_mean[step] - rw_std[step],
+        rw_mean[step] + rw_std[step],
+        alpha=0.15,
     )
-    axes[0].plot(x, eigenmarkov_mean[step], label="EigenMarkov mean", linewidth=1.8)
-    axes[0].fill_between(
+    ax.plot(x, em_mean[step], label="EigenMarkov mean", linewidth=1.8)
+    ax.fill_between(
         x,
-        eigenmarkov_mean[step] - eigenmarkov_std[step],
-        eigenmarkov_mean[step] + eigenmarkov_std[step],
-        alpha=0.18,
+        em_mean[step] - em_std[step],
+        em_mean[step] + em_std[step],
+        alpha=0.15,
     )
-    axes[0].set_title(f"Spatial profile at t = {t[step]:g} µs")
-    axes[0].set_xlabel("distance (µm)")
-    axes[0].set_ylabel("particle count")
-    axes[0].legend(fontsize=9)
+    ax.set_title(f"Spatial mean at t = {t[step]:g} µs")
+    ax.set_xlabel("distance (µm)")
+    ax.set_ylabel("particle count")
+    ax.legend(fontsize=8)
 
-    axes[1].plot(t, deterministic[:, impulse], label="deterministic mean", linewidth=2.2)
-    axes[1].plot(t, random_walk_mean[:, impulse], label="random-walk mean", linewidth=1.8)
-    axes[1].fill_between(
+    ax = axes[0, 1]
+    ax.plot(
         t,
-        random_walk_mean[:, impulse] - random_walk_std[:, impulse],
-        random_walk_mean[:, impulse] + random_walk_std[:, impulse],
-        alpha=0.18,
+        continuous_reference[:, impulse],
+        "--",
+        label="continuous reference",
+        linewidth=1.8,
     )
-    axes[1].plot(t, eigenmarkov_mean[:, impulse], label="EigenMarkov mean", linewidth=1.8)
-    axes[1].fill_between(
+    ax.plot(
         t,
-        eigenmarkov_mean[:, impulse] - eigenmarkov_std[:, impulse],
-        eigenmarkov_mean[:, impulse] + eigenmarkov_std[:, impulse],
-        alpha=0.18,
+        discrete_reference[:, impulse],
+        label="discrete expected mean",
+        linewidth=2.2,
     )
-    axes[1].set_title("Impulse-node time course")
-    axes[1].set_xlabel("time (µs)")
-    axes[1].set_ylabel("particle count")
-    axes[1].legend(fontsize=9)
+    ax.plot(t, rw_mean[:, impulse], label="random-walk mean", linewidth=1.8)
+    ax.fill_between(
+        t,
+        rw_mean[:, impulse] - rw_std[:, impulse],
+        rw_mean[:, impulse] + rw_std[:, impulse],
+        alpha=0.15,
+    )
+    ax.plot(t, em_mean[:, impulse], label="EigenMarkov mean", linewidth=1.8)
+    ax.fill_between(
+        t,
+        em_mean[:, impulse] - em_std[:, impulse],
+        em_mean[:, impulse] + em_std[:, impulse],
+        alpha=0.15,
+    )
+    ax.set_title("Impulse-node mean time course")
+    ax.set_xlabel("time (µs)")
+    ax.set_ylabel("particle count")
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 0]
+    ax.plot(x, analytic_variance[step], label="analytic multinomial variance", linewidth=2.2)
+    ax.plot(x, rw_variance[step], label="random-walk sample variance", linewidth=1.8)
+    ax.plot(x, em_variance[step], label="EigenMarkov sample variance", linewidth=1.8)
+    ax.set_title(f"Spatial variance at t = {t[step]:g} µs")
+    ax.set_xlabel("distance (µm)")
+    ax.set_ylabel("particle-count variance")
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 1]
+    ax.plot(t, np.mean(rw_negative_mass, axis=0), label="random walk", linewidth=1.8)
+    ax.plot(t, np.mean(em_negative_mass, axis=0), label="EigenMarkov", linewidth=1.8)
+    ax.set_title("Mean negative mass fraction")
+    ax.set_xlabel("time (µs)")
+    ax.set_ylabel("negative mass / total particles")
+    ax.set_ylim(bottom=0.0)
+    ax.legend(fontsize=8)
 
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
@@ -85,23 +132,44 @@ def plot_validation(
 
 def plot_mode_sweep(
     modes: list[int],
-    relative_errors: list[float],
-    negative_fractions: list[float],
+    time_window_errors: dict[float, list[float]],
+    variance_errors: list[float],
+    negative_mass_fractions: list[float],
+    negative_entry_fractions: list[float],
     output_path: str | Path,
 ) -> Path:
+    """Plot time-resolved mean error and physicality diagnostics."""
+
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(1, 2, figsize=(9, 4))
-    axes[0].plot(modes, relative_errors, marker="o")
-    axes[0].set_xlabel("retained eigenmodes")
-    axes[0].set_ylabel("relative L2 error")
-    axes[0].set_title("Mean accuracy")
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0))
 
-    axes[1].plot(modes, negative_fractions, marker="o")
-    axes[1].set_xlabel("retained eigenmodes")
-    axes[1].set_ylabel("fraction below zero")
-    axes[1].set_title("Nonnegativity diagnostic")
+    ax = axes[0, 0]
+    for start_time, errors in sorted(time_window_errors.items()):
+        ax.plot(modes, errors, marker="o", label=f"t ≥ {start_time:g} µs")
+    ax.set_xlabel("retained eigenmodes")
+    ax.set_ylabel("relative L2 mean error")
+    ax.set_title("Mean accuracy by evaluation window")
+    ax.legend(fontsize=8)
+
+    ax = axes[0, 1]
+    ax.plot(modes, variance_errors, marker="o")
+    ax.set_xlabel("retained eigenmodes")
+    ax.set_ylabel("relative L2 variance error")
+    ax.set_title("Variance accuracy")
+
+    ax = axes[1, 0]
+    ax.plot(modes, negative_mass_fractions, marker="o")
+    ax.set_xlabel("retained eigenmodes")
+    ax.set_ylabel("mean negative mass fraction")
+    ax.set_title("Negative reconstructed mass")
+
+    ax = axes[1, 1]
+    ax.plot(modes, negative_entry_fractions, marker="o")
+    ax.set_xlabel("retained eigenmodes")
+    ax.set_ylabel("fraction of entries below zero")
+    ax.set_title("Nonnegativity diagnostic")
 
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")

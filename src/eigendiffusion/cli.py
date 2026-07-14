@@ -9,15 +9,24 @@ from pathlib import Path
 
 import numpy as np
 
-from .baselines import deterministic_diffusion
 from .benchmarking import benchmark_random_walks, write_benchmark_csv
 from .config import DiffusionConfig
 from .ensemble import run_eigenmarkov_ensemble, run_random_walk_ensemble
-from .metrics import summarize
+from .metrics import (
+    relative_l2_error,
+    relative_l2_error_from_time,
+    summarize_ensemble,
+)
 from .plotting import (
     plot_mode_sweep,
     plot_random_walk_benchmark,
     plot_validation,
+)
+from .references import (
+    continuous_expected_diffusion,
+    discrete_expected_diffusion,
+    multinomial_marginal_covariance,
+    multinomial_marginal_variance,
 )
 
 
@@ -51,11 +60,44 @@ def _config_from_args(args: argparse.Namespace) -> DiffusionConfig:
     )
 
 
+def _nearest_time_indices(
+    times: np.ndarray,
+    requested_times: list[float],
+    *,
+    exclude_zero: bool = False,
+) -> tuple[list[int], list[float]]:
+    indices: list[int] = []
+    selected_times: list[float] = []
+    for requested in requested_times:
+        if requested < times[0] - 1e-12 or requested > times[-1] + 1e-12:
+            continue
+        index = int(np.argmin(np.abs(times - requested)))
+        if exclude_zero and index == 0:
+            continue
+        if index not in indices:
+            indices.append(index)
+            selected_times.append(float(times[index]))
+    if not indices:
+        fallback = 1 if exclude_zero and times.size > 1 else 0
+        indices = [fallback]
+        selected_times = [float(times[fallback])]
+    return indices, selected_times
+
+
+def _time_column(start_time: float) -> str:
+    text = f"{start_time:g}".replace("-", "m").replace(".", "p")
+    return f"mean_relative_l2_t_ge_{text}us"
+
+
 def run_validation(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
     n_modes = config.n_nodes if args.modes is None else args.modes
 
-    deterministic = deterministic_diffusion(config)
+    continuous_reference = continuous_expected_diffusion(config)
+    discrete_reference = discrete_expected_diffusion(config)
+    analytic_variance = multinomial_marginal_variance(config)
+    analytic_covariance = multinomial_marginal_covariance(config)
+
     random_walk = run_random_walk_ensemble(
         config,
         n_runs=args.runs,
@@ -71,16 +113,35 @@ def run_validation(args: argparse.Namespace) -> int:
         seed=args.seed + 1,
     )
 
-    em_metrics = summarize(deterministic, eigenmarkov.mean)
-    rw_metrics = summarize(deterministic, random_walk.mean)
+    covariance_indices, covariance_times = _nearest_time_indices(
+        config.times,
+        args.covariance_times,
+        exclude_zero=True,
+    )
+    em_metrics = summarize_ensemble(
+        discrete_reference,
+        analytic_variance,
+        eigenmarkov.runs,
+        config.n_particles,
+        reference_covariance=analytic_covariance,
+        covariance_time_indices=covariance_indices,
+    )
+    rw_metrics = summarize_ensemble(
+        discrete_reference,
+        analytic_variance,
+        random_walk.runs,
+        config.n_particles,
+        reference_covariance=analytic_covariance,
+        covariance_time_indices=covariance_indices,
+    )
 
     output = plot_validation(
         config=config,
-        deterministic=deterministic,
-        eigenmarkov_mean=eigenmarkov.mean,
-        eigenmarkov_std=eigenmarkov.std,
-        random_walk_mean=random_walk.mean,
-        random_walk_std=random_walk.std,
+        continuous_reference=continuous_reference,
+        discrete_reference=discrete_reference,
+        analytic_variance=analytic_variance,
+        eigenmarkov_runs=eigenmarkov.runs,
+        random_walk_runs=random_walk.runs,
         output_path=args.output,
         profile_step=args.profile_step,
     )
@@ -89,7 +150,12 @@ def run_validation(args: argparse.Namespace) -> int:
     data_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         data_path,
-        deterministic=deterministic,
+        continuous_reference=continuous_reference,
+        discrete_reference=discrete_reference,
+        analytic_variance=analytic_variance,
+        analytic_covariance_selected=analytic_covariance[covariance_indices],
+        covariance_time_indices=np.asarray(covariance_indices, dtype=int),
+        covariance_times=np.asarray(covariance_times, dtype=float),
         eigenmarkov_runs=eigenmarkov.runs,
         random_walk_runs=random_walk.runs,
         random_walk_method=args.random_walk_method,
@@ -110,9 +176,16 @@ def run_validation(args: argparse.Namespace) -> int:
             "runs": args.runs,
             "modal_particle_weight": args.modal_particle_weight,
             "random_walk_method": args.random_walk_method,
+            "covariance_times": covariance_times,
         },
-        "eigenmarkov": em_metrics.as_dict(),
-        "random_walk": rw_metrics.as_dict(),
+        "reference_difference": {
+            "continuous_vs_discrete_relative_l2": relative_l2_error(
+                discrete_reference,
+                continuous_reference,
+            )
+        },
+        "eigenmarkov_vs_discrete": em_metrics.as_dict(),
+        "random_walk_vs_discrete": rw_metrics.as_dict(),
         "figure": str(output),
         "data": str(data_path),
     }
@@ -123,7 +196,7 @@ def run_validation(args: argparse.Namespace) -> int:
 def run_sweep(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
     if args.modes is None:
-        candidates = [2, 5, 10, 20, 50, config.n_nodes]
+        candidates = [2, 5, 10, 20, 50, 75, config.n_nodes]
         requested_modes = sorted({mode for mode in candidates if mode <= config.n_nodes})
     else:
         requested_modes = sorted(set(args.modes))
@@ -131,7 +204,18 @@ def run_sweep(args: argparse.Namespace) -> int:
         if not 1 <= mode_count <= config.n_nodes:
             raise ValueError(f"mode count {mode_count} is outside [1, {config.n_nodes}]")
 
-    deterministic = deterministic_diffusion(config)
+    valid_start_times = sorted(
+        {
+            float(start)
+            for start in args.error_start_times
+            if config.times[0] - 1e-12 <= start <= config.times[-1] + 1e-12
+        }
+    )
+    if not valid_start_times:
+        valid_start_times = [0.0]
+
+    discrete_reference = discrete_expected_diffusion(config)
+    analytic_variance = multinomial_marginal_variance(config)
     rows: list[dict[str, float | int]] = []
 
     for mode_count in requested_modes:
@@ -143,11 +227,32 @@ def run_sweep(args: argparse.Namespace) -> int:
             initialization=args.initialization,
             seed=args.seed + mode_count,
         )
-        metrics = summarize(deterministic, ensemble.mean)
-        rows.append({"n_modes": mode_count, **metrics.as_dict()})
+        diagnostics = summarize_ensemble(
+            discrete_reference,
+            analytic_variance,
+            ensemble.runs,
+            config.n_particles,
+        )
+        diagnostic_values = diagnostics.as_dict()
+        diagnostic_values.pop("covariance_relative_frobenius_error", None)
+        row: dict[str, float | int] = {
+            "n_modes": mode_count,
+            **diagnostic_values,
+        }
+        mean = ensemble.mean
+        for start_time in valid_start_times:
+            row[_time_column(start_time)] = relative_l2_error_from_time(
+                discrete_reference,
+                mean,
+                config.times,
+                start_time,
+            )
+        rows.append(row)
         print(
-            f"modes={mode_count:4d}  relative_l2={metrics.relative_l2_error:.6g}  "
-            f"negative_fraction={metrics.negative_value_fraction:.6g}"
+            f"modes={mode_count:4d}  "
+            f"mean_l2={diagnostics.mean_relative_l2_error:.6g}  "
+            f"variance_l2={diagnostics.variance_relative_l2_error:.6g}  "
+            f"negative_mass={diagnostics.mean_negative_mass_fraction:.6g}"
         )
 
     csv_path = Path(args.csv_output)
@@ -157,10 +262,18 @@ def run_sweep(args: argparse.Namespace) -> int:
         writer.writeheader()
         writer.writerows(rows)
 
+    time_window_errors = {
+        start_time: [float(row[_time_column(start_time)]) for row in rows]
+        for start_time in valid_start_times
+    }
     figure = plot_mode_sweep(
         modes=[int(row["n_modes"]) for row in rows],
-        relative_errors=[float(row["relative_l2_error"]) for row in rows],
-        negative_fractions=[float(row["negative_value_fraction"]) for row in rows],
+        time_window_errors=time_window_errors,
+        variance_errors=[float(row["variance_relative_l2_error"]) for row in rows],
+        negative_mass_fractions=[
+            float(row["mean_negative_mass_fraction"]) for row in rows
+        ],
+        negative_entry_fractions=[float(row["negative_entry_fraction"]) for row in rows],
         output_path=args.output,
     )
     print(f"Saved {csv_path}")
@@ -218,7 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate = subparsers.add_parser(
         "validate",
-        help="Compare EigenMarkov with random-walk and deterministic diffusion.",
+        help="Compare EigenMarkov with exact discrete, continuous, and random-walk references.",
     )
     _add_shared_arguments(validate)
     validate.add_argument("--modes", type=int, default=None)
@@ -228,6 +341,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="multinomial",
         help="Random-walk implementation used for validation.",
     )
+    validate.add_argument(
+        "--covariance-times",
+        type=float,
+        nargs="+",
+        default=[1.0, 5.0, 20.0, 100.0],
+        help="Times used for same-time spatial covariance error.",
+    )
     validate.add_argument("--profile-step", type=int, default=None)
     validate.add_argument("--output", default="outputs/validation.png")
     validate.add_argument("--data-output", default=None)
@@ -235,10 +355,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sweep = subparsers.add_parser(
         "sweep-modes",
-        help="Measure accuracy and negative reconstructions versus retained modes.",
+        help="Measure time-resolved mean, variance, and nonnegativity versus retained modes.",
     )
     _add_shared_arguments(sweep)
     sweep.add_argument("--modes", type=int, nargs="+", default=None)
+    sweep.add_argument(
+        "--error-start-times",
+        type=float,
+        nargs="+",
+        default=[0.0, 1.0, 5.0, 10.0, 20.0],
+        help="Report mean error using only times at or after each listed time.",
+    )
     sweep.add_argument("--output", default="outputs/mode_sweep.png")
     sweep.add_argument("--csv-output", default="outputs/mode_sweep.csv")
     sweep.set_defaults(handler=run_sweep)

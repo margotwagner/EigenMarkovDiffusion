@@ -1,3 +1,16 @@
+Metadata-Version: 2.4
+Name: eigendiffusion
+Version: 0.3.0
+Summary: Stochastic diffusion using Markov dynamics in a Laplacian eigenbasis
+Author: Margot Wagner
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: matplotlib>=3.7
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+Requires-Dist: ruff>=0.5; extra == "dev"
+
 # EigenDiffusion
 
 A small, reproducible research codebase for **stochastic diffusion using Markov
