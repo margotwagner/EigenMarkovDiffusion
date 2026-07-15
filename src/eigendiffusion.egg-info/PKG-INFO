@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: eigendiffusion
-Version: 0.3.0
+Version: 0.4.0
 Summary: Stochastic diffusion using Markov dynamics in a Laplacian eigenbasis
 Author: Margot Wagner
 Requires-Python: >=3.10
@@ -13,78 +13,42 @@ Requires-Dist: ruff>=0.5; extra == "dev"
 
 # EigenDiffusion
 
-A small, reproducible research codebase for **stochastic diffusion using Markov
-dynamics in a diffusion eigenbasis**.
+A reproducible research codebase for stochastic diffusion in a diffusion
+eigenbasis.
 
 The repository contains:
 
-- the current EigenMarkov model;
-- a naive particle-by-particle random walk;
-- an exact aggregated multinomial random walk;
-- continuous-time and discrete-time analytic mean references;
-- the exact multinomial node variance and same-time spatial covariance;
-- validation, mode-sweep, and random-walk benchmark commands.
+- `independent_modal`: the original EigenMarkov two-state model, preserved
+  unchanged and kept as the default;
+- `correlated_modal`: an experimental Gaussian moment-closure model using
+  shared spatial debit-credit noise projected into the eigenbasis;
+- `banked_correlated_modal`: the correlated model with a nonnegative,
+  mass-conserving spatial debt/profit ledger;
+- naive particle-by-particle and aggregated multinomial random-walk baselines;
+- exact continuous/discrete mean, variance, and covariance references;
+- validation, model-comparison, mode-sweep, and benchmark commands.
 
-## Scientific idea
+## Mathematical setup
 
-After spatial discretization, diffusion is written as
+After spatial discretization,
 
 \[
 \frac{d\mathbf n}{dt}=-A\mathbf n,
-\qquad A=V\Lambda V^\top,
-\qquad \mathbf m=V^\top\mathbf n.
+\qquad
+A=V\Lambda V^\top,
+\qquad
+\mathbf m=V^\top\mathbf n.
 \]
 
-EigenMarkov represents each nonconstant mode as the difference between positive
-and negative Markov-state populations. A state unit switches sign with
-probability
-
-\[
-p_k=\frac{\lambda_k\Delta t}{2},
-\]
-
-so the expected one-step update is
-
-\[
-\mathbb E[m_k(t+\Delta t)]
-=(1-\lambda_k\Delta t)\mathbb E[m_k(t)].
-\]
-
-The spatial distribution is reconstructed as \(\mathbf n=V\mathbf m\). Retaining
-only the first \(M\) slow modes gives a reduced-order approximation.
-
-> **Current scientific status:** the EigenMarkov ensemble mean closely follows
-> the finite-step diffusion mean, but independent modal sampling does not yet
-> reproduce the full covariance of a physical particle process. It can also
-> reconstruct negative spatial counts. The code now measures these limitations
-> directly instead of clipping them.
-
-## Why there are two deterministic means
-
-The stochastic simulations advance in finite steps, so there are two distinct
-reference solutions:
-
-### Continuous-time reference
-
-\[
-\mathbf n(t)=e^{-At}\mathbf n_0.
-\]
-
-This is the exact matrix-exponential solution of the spatially discretized ODE.
-
-### Discrete-time expected random walk
+The finite-step expected diffusion update is
 
 \[
 \mathbf n_{t+1}=P\mathbf n_t,
-\qquad P=I-\Delta t A.
+\qquad
+P=I-\Delta t A.
 \]
 
-This is the exact ensemble mean of the implemented finite-step random walk and
-the appropriate mean target for the current first-order EigenMarkov process.
-The validation report shows both, but computes stochastic mean error against the
-discrete reference.
-
-For independent particles starting at one node,
+For independent particles initially placed at one node,
 
 \[
 \mathbf n_t\sim\operatorname{Multinomial}(N,\mathbf p_t),
@@ -93,17 +57,15 @@ For independent particles starting at one node,
 with
 
 \[
-\operatorname{Var}[n_i(t)] = Np_i(t)(1-p_i(t))
-\]
-
-and
-
-\[
-\operatorname{Cov}[\mathbf n(t)]
+\operatorname{Cov}[\mathbf n_t]
 =N\left[\operatorname{diag}(\mathbf p_t)-\mathbf p_t\mathbf p_t^\top\right].
 \]
 
-These are now used as exact variance and covariance targets.
+The project tests whether a reduced modal process can reproduce these moments
+while remaining mass-conserving and physically nonnegative.
+
+See [`docs/MODAL_MODELS.md`](docs/MODAL_MODELS.md) for the exact distinction
+between the three modal formulations.
 
 ## Installation with Conda
 
@@ -116,7 +78,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Verify the environment:
+Verify the installation:
 
 ```bash
 python --version
@@ -125,43 +87,16 @@ pytest
 ruff check .
 ```
 
-Using `python -m eigendiffusion` is the most reliable command form. After an
-editable install, the shorter `eigendiffusion ...` command should also work.
+Use `python -m eigendiffusion` rather than relying on the standalone shell
+command.
 
-## First run: quick smoke validation
+## Recommended run order
 
-```bash
-python -m eigendiffusion validate \
-  --particles 1000 \
-  --nodes 31 \
-  --steps 40 \
-  --runs 20 \
-  --modes 31 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 39 \
-  --output outputs/smoke_validation.png
-```
-
-This writes:
-
-- `outputs/smoke_validation.png`
-- `outputs/smoke_validation.npz`
-- a JSON report printed to the terminal
-
-The figure contains:
-
-1. spatial mean compared with both analytic references;
-2. impulse-node mean over time;
-3. analytic versus sampled variance;
-4. negative reconstructed mass over time.
-
-The JSON report contains mean, variance, covariance, mass-conservation, and
-nonnegativity diagnostics for both stochastic methods.
-
-## Main full-mode validation
+### 1. Confirm the preserved original model
 
 ```bash
 python -m eigendiffusion validate \
+  --modal-model independent_modal \
   --particles 5275 \
   --nodes 101 \
   --steps 101 \
@@ -171,82 +106,96 @@ python -m eigendiffusion validate \
   --random-walk-method multinomial \
   --covariance-times 1 5 20 50 100 \
   --seed 0 \
-  --output outputs/full_mode_validation_v2.png
+  --output outputs/independent_modal_full.png
 ```
 
-Important report fields:
+This reproduces the existing EigenMarkov baseline. The old
+`run_eigenmarkov_ensemble` Python API remains available as a backward-compatible
+wrapper around `independent_modal`.
 
-- `mean_relative_l2_error`: mean error against the exact discrete-time target;
-- `variance_relative_l2_error`: error against exact multinomial node variance;
-- `covariance_relative_frobenius_error`: same-time spatial covariance error at
-  the requested times;
-- `mean_negative_mass_fraction`: average magnitude of negative reconstructed
-  mass divided by total particle count;
-- `negative_entry_fraction`: fraction of all run/time/node entries below zero;
-- `maximum_mass_error`: deviation from the conserved total particle count.
-
-## Confirm the naive random walk
-
-The naive method stores every particle trajectory and is slower, so use fewer
-runs initially:
+### 2. Validate correlated modal noise
 
 ```bash
 python -m eigendiffusion validate \
+  --modal-model correlated_modal \
   --particles 5275 \
   --nodes 101 \
   --steps 101 \
   --impulse-index 59 \
-  --runs 20 \
+  --runs 100 \
   --modes 101 \
-  --random-walk-method naive \
+  --random-walk-method multinomial \
   --covariance-times 1 5 20 50 100 \
   --seed 0 \
-  --output outputs/full_mode_validation_naive_v2.png
+  --output outputs/correlated_modal_full.png
 ```
 
-## Time-resolved mode sweep
+This model should be judged primarily by variance and covariance improvement.
+It may still produce negative spatial values.
 
-A delta-function initial condition requires many high-frequency modes at
-\(t=0\), even though those modes decay rapidly. The mode sweep therefore reports
-mean accuracy over several evaluation windows.
+### 3. Validate the banked model
+
+```bash
+python -m eigendiffusion validate \
+  --modal-model banked_correlated_modal \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 100 \
+  --modes 101 \
+  --random-walk-method multinomial \
+  --covariance-times 1 5 20 50 100 \
+  --seed 0 \
+  --output outputs/banked_correlated_modal_full.png
+```
+
+The banked model should have zero negative mass and near-zero mass error. Its
+JSON report also includes:
+
+- `mean_bank_l1_fraction`;
+- `maximum_bank_l1_fraction`;
+- `final_mean_bank_l1_fraction`.
+
+A large or growing bank means the projection is doing substantial hidden work.
+
+### 4. Compare all models directly
+
+```bash
+python -m eigendiffusion compare-modal-models \
+  --models independent_modal correlated_modal banked_correlated_modal \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 100 \
+  --modes 101 \
+  --random-walk-method multinomial \
+  --covariance-times 1 5 20 50 100 \
+  --seed 0 \
+  --output outputs/modal_model_comparison.png \
+  --csv-output outputs/modal_model_comparison.csv
+```
+
+This creates a shared comparison figure, CSV metrics, NPZ arrays, and a JSON
+report printed to the terminal.
+
+### 5. Sweep retained modes separately for each model
 
 ```bash
 python -m eigendiffusion sweep-modes \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
+  --modal-model independent_modal \
   --modes 2 5 10 20 50 75 101 \
   --runs 100 \
   --error-start-times 0 1 5 10 20 \
   --seed 0 \
-  --output outputs/mode_sweep_v2.png \
-  --csv-output outputs/mode_sweep_v2.csv
+  --output outputs/mode_sweep_independent.png \
+  --csv-output outputs/mode_sweep_independent.csv
 ```
 
-The CSV includes:
-
-- mean error from each requested starting time;
-- variance error;
-- negative-entry fraction;
-- mean and maximum negative-mass fraction;
-- minimum reconstructed count;
-- maximum mass error.
-
-## Benchmark the random-walk implementations
-
-```bash
-python -m eigendiffusion benchmark-random-walk \
-  --particle-counts 100 500 1000 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --repeats 5 \
-  --output outputs/random_walk_benchmark.png \
-  --csv-output outputs/random_walk_benchmark.csv
-```
-
-The benchmark separates the gain from ordinary node aggregation from any future
-advantage due specifically to eigenmode reduction.
+Replace `independent_modal` with `correlated_modal` and
+`banked_correlated_modal` for the other two sweeps. Use distinct output names so
+results are not overwritten.
 
 ## Python API
 
@@ -254,13 +203,10 @@ advantage due specifically to eigenmode reduction.
 import numpy as np
 
 from eigendiffusion import (
+    BankedCorrelatedModalDiffusion,
+    CorrelatedModalDiffusion,
     DiffusionConfig,
-    EigenMarkovDiffusion,
-    continuous_expected_diffusion,
-    discrete_expected_diffusion,
-    multinomial_marginal_covariance,
-    multinomial_marginal_variance,
-    multinomial_random_walk_diffusion,
+    IndependentModalDiffusion,
 )
 
 config = DiffusionConfig(
@@ -270,47 +216,48 @@ config = DiffusionConfig(
     impulse_index=59,
 )
 
-continuous_mean = continuous_expected_diffusion(config)
-discrete_mean = discrete_expected_diffusion(config)
-exact_variance = multinomial_marginal_variance(config)
-exact_covariance = multinomial_marginal_covariance(config)
-
-random_walk = multinomial_random_walk_diffusion(
-    config,
-    rng=np.random.default_rng(1),
+independent = IndependentModalDiffusion(config, n_modes=101).run(
+    rng=np.random.default_rng(1)
 )
-
-eigenmarkov = EigenMarkovDiffusion(config, n_modes=101).run(
-    rng=np.random.default_rng(2),
+correlated = CorrelatedModalDiffusion(config, n_modes=101).run(
+    rng=np.random.default_rng(2)
+)
+banked = BankedCorrelatedModalDiffusion(config, n_modes=101).run(
+    rng=np.random.default_rng(3)
 )
 ```
+
+`EigenMarkovDiffusion` remains an alias-compatible class for the original
+model, but new comparison code should use the explicit name
+`IndependentModalDiffusion`.
 
 ## Repository layout
 
 ```text
 src/eigendiffusion/
-    config.py          physical and numerical parameters
-    operators.py       Neumann diffusion operator and eigentransforms
-    references.py      continuous/discrete means and exact multinomial statistics
-    eigenmarkov.py     stochastic modal model
-    baselines.py       naive and multinomial random walks
-    ensemble.py        reproducible repeated simulations
-    metrics.py         mean, variance, covariance, mass, and nonnegativity metrics
-    benchmarking.py    random-walk runtime and core-array storage estimates
-    plotting.py        validation, sweep, and benchmark figures
-    cli.py             command-line interface
+    config.py             physical and numerical parameters
+    operators.py          diffusion operator and eigentransforms
+    references.py         exact continuous/discrete moment references
+    eigenmarkov.py        independent_modal, unchanged original model
+    correlated_modal.py   correlated and banked correlated prototypes
+    baselines.py          naive and multinomial random walks
+    ensemble.py           repeated simulations and model selection
+    metrics.py            mean, variance, covariance, mass diagnostics
+    plotting.py           validation, comparison, sweep, benchmark figures
+    cli.py                command-line interface
 
-tests/                 mathematical and conservation tests
-docs/                  project math, status, and refactor notes
-outputs/               generated files; ignored by Git
+tests/                    mathematical and conservation tests
+docs/                     model definitions, math, and project status
+outputs/                  generated results; ignored by Git
 ```
 
 ## Interpretation cautions
 
-- Do not use the continuous-time reference as the sole target for a finite-step
-  stochastic simulation.
-- Do not claim stochastic equivalence from agreement of the ensemble mean alone.
-- Do not clip negative EigenMarkov reconstructions during validation; clipping
-  changes the mean, variance, covariance, and potentially mass.
-- Use the multinomial random walk as the routine baseline and the naive random
-  walk as an implementation benchmark and equivalence check.
+- `correlated_modal` is a Gaussian moment approximation, not an exact discrete
+  particle simulator.
+- `banked_correlated_modal` guarantees physical outputs by projection, but its
+  spatial bank makes it not purely reduced order.
+- Agreement of the mean alone is insufficient. Compare variance, covariance,
+  nonnegativity, mass conservation, and bank magnitude.
+- Keep `independent_modal` as the baseline until the experimental variants are
+  demonstrably better.

@@ -174,3 +174,7 @@ class EigenMarkovDiffusion:
             initial_modal_amplitudes=modal_initial,
             modal_particle_weight=self.modal_particle_weight,
         )
+
+
+class IndependentModalDiffusion(EigenMarkovDiffusion):
+    """Explicit name for the original independent two-state modal model."""

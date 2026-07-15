@@ -21,3 +21,18 @@ count, and mass-conservation error. No clipping or projection is applied.
 The next model-development step should address correlated modal noise or another
 constrained stochastic reduced-order representation. Refactoring or plotting
 changes alone cannot resolve this mathematical limitation.
+
+## v0.4 experimental modal variants
+
+The original EigenMarkov formulation is now explicitly named
+`independent_modal` and remains unchanged. Two research prototypes are added
+alongside it:
+
+- `correlated_modal`, which projects shared spatial Gaussian debit-credit noise
+  into the retained eigenbasis;
+- `banked_correlated_modal`, which additionally projects onto the nonnegative
+  constant-mass simplex and carries the correction in a spatial residual bank.
+
+These variants are hypotheses to test, not established replacements. The
+comparison criteria are mean, variance, covariance, nonnegativity, mass
+conservation, and—where applicable—bank magnitude.

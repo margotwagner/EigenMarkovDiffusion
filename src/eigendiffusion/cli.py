@@ -1,4 +1,4 @@
-"""Command-line interface for validation, sweeps, and benchmarks."""
+"""Command-line interface for validation, sweeps, comparisons, and benchmarks."""
 
 from __future__ import annotations
 
@@ -11,7 +11,13 @@ import numpy as np
 
 from .benchmarking import benchmark_random_walks, write_benchmark_csv
 from .config import DiffusionConfig
-from .ensemble import run_eigenmarkov_ensemble, run_random_walk_ensemble
+from .ensemble import (
+    MODAL_MODEL_NAMES,
+    EnsembleResult,
+    ModalModelName,
+    run_modal_ensemble,
+    run_random_walk_ensemble,
+)
 from .metrics import (
     relative_l2_error,
     relative_l2_error_from_time,
@@ -19,6 +25,7 @@ from .metrics import (
 )
 from .plotting import (
     plot_mode_sweep,
+    plot_model_comparison,
     plot_random_walk_benchmark,
     plot_validation,
 )
@@ -40,11 +47,39 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--diffusion", type=float, default=2.20e-4)
     parser.add_argument("--runs", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--modal-particle-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--modal-particle-weight",
+        type=float,
+        default=1.0,
+        help="Used only by independent_modal.",
+    )
     parser.add_argument(
         "--initialization",
         choices=("nearest", "stochastic"),
         default="nearest",
+        help="Used only by independent_modal.",
+    )
+
+
+def _add_modal_model_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--modal-model",
+        choices=MODAL_MODEL_NAMES,
+        default="independent_modal",
+        help=(
+            "Modal formulation to run. independent_modal is the unchanged original "
+            "EigenMarkov model."
+        ),
+    )
+
+
+def _add_covariance_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--covariance-times",
+        type=float,
+        nargs="+",
+        default=[1.0, 5.0, 20.0, 100.0],
+        help="Times used for same-time spatial covariance error.",
     )
 
 
@@ -89,6 +124,37 @@ def _time_column(start_time: float) -> str:
     return f"mean_relative_l2_t_ge_{text}us"
 
 
+def _bank_diagnostics(ensemble: EnsembleResult) -> dict[str, float]:
+    if not ensemble.auxiliary or "bank_l1_fraction" not in ensemble.auxiliary:
+        return {}
+    values = ensemble.auxiliary["bank_l1_fraction"]
+    return {
+        "mean_bank_l1_fraction": float(np.mean(values)),
+        "maximum_bank_l1_fraction": float(np.max(values)),
+        "final_mean_bank_l1_fraction": float(np.mean(values[:, -1])),
+    }
+
+
+def _run_selected_modal(
+    config: DiffusionConfig,
+    args: argparse.Namespace,
+    *,
+    n_modes: int,
+    seed: int,
+    model: ModalModelName | None = None,
+) -> EnsembleResult:
+    selected_model = args.modal_model if model is None else model
+    return run_modal_ensemble(
+        config,
+        n_runs=args.runs,
+        model=selected_model,
+        n_modes=n_modes,
+        modal_particle_weight=args.modal_particle_weight,
+        initialization=args.initialization,
+        seed=seed,
+    )
+
+
 def run_validation(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
     n_modes = config.n_nodes if args.modes is None else args.modes
@@ -104,12 +170,10 @@ def run_validation(args: argparse.Namespace) -> int:
         seed=args.seed,
         method=args.random_walk_method,
     )
-    eigenmarkov = run_eigenmarkov_ensemble(
+    modal = _run_selected_modal(
         config,
-        n_runs=args.runs,
+        args,
         n_modes=n_modes,
-        modal_particle_weight=args.modal_particle_weight,
-        initialization=args.initialization,
         seed=args.seed + 1,
     )
 
@@ -118,10 +182,10 @@ def run_validation(args: argparse.Namespace) -> int:
         args.covariance_times,
         exclude_zero=True,
     )
-    em_metrics = summarize_ensemble(
+    modal_metrics = summarize_ensemble(
         discrete_reference,
         analytic_variance,
-        eigenmarkov.runs,
+        modal.runs,
         config.n_particles,
         reference_covariance=analytic_covariance,
         covariance_time_indices=covariance_indices,
@@ -140,29 +204,39 @@ def run_validation(args: argparse.Namespace) -> int:
         continuous_reference=continuous_reference,
         discrete_reference=discrete_reference,
         analytic_variance=analytic_variance,
-        eigenmarkov_runs=eigenmarkov.runs,
+        modal_runs=modal.runs,
         random_walk_runs=random_walk.runs,
         output_path=args.output,
         profile_step=args.profile_step,
+        modal_label=args.modal_model,
     )
 
     data_path = Path(args.data_output) if args.data_output else output.with_suffix(".npz")
     data_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        data_path,
-        continuous_reference=continuous_reference,
-        discrete_reference=discrete_reference,
-        analytic_variance=analytic_variance,
-        analytic_covariance_selected=analytic_covariance[covariance_indices],
-        covariance_time_indices=np.asarray(covariance_indices, dtype=int),
-        covariance_times=np.asarray(covariance_times, dtype=float),
-        eigenmarkov_runs=eigenmarkov.runs,
-        random_walk_runs=random_walk.runs,
-        random_walk_method=args.random_walk_method,
-        times=config.times,
-        positions=config.positions,
-    )
+    save_items: dict[str, object] = {
+        "continuous_reference": continuous_reference,
+        "discrete_reference": discrete_reference,
+        "analytic_variance": analytic_variance,
+        "analytic_covariance_selected": analytic_covariance[covariance_indices],
+        "covariance_time_indices": np.asarray(covariance_indices, dtype=int),
+        "covariance_times": np.asarray(covariance_times, dtype=float),
+        "modal_runs": modal.runs,
+        "modal_model": np.asarray(args.modal_model),
+        "random_walk_runs": random_walk.runs,
+        "random_walk_method": np.asarray(args.random_walk_method),
+        "times": config.times,
+        "positions": config.positions,
+    }
+    if modal.auxiliary:
+        for key, value in modal.auxiliary.items():
+            save_items[f"modal_aux_{key}"] = value
+    # Preserve the previous data key for users loading old independent-model outputs.
+    if args.modal_model == "independent_modal":
+        save_items["eigenmarkov_runs"] = modal.runs
+    np.savez_compressed(data_path, **save_items)
 
+    modal_report = modal_metrics.as_dict()
+    modal_report.update(_bank_diagnostics(modal))
     report = {
         "configuration": {
             "particles": config.n_particles,
@@ -174,7 +248,9 @@ def run_validation(args: argparse.Namespace) -> int:
             "diffusion_coefficient": config.diffusion_coefficient,
             "modes": n_modes,
             "runs": args.runs,
+            "modal_model": args.modal_model,
             "modal_particle_weight": args.modal_particle_weight,
+            "initialization": args.initialization,
             "random_walk_method": args.random_walk_method,
             "covariance_times": covariance_times,
         },
@@ -184,7 +260,7 @@ def run_validation(args: argparse.Namespace) -> int:
                 continuous_reference,
             )
         },
-        "eigenmarkov_vs_discrete": em_metrics.as_dict(),
+        f"{args.modal_model}_vs_discrete": modal_report,
         "random_walk_vs_discrete": rw_metrics.as_dict(),
         "figure": str(output),
         "data": str(data_path),
@@ -216,15 +292,13 @@ def run_sweep(args: argparse.Namespace) -> int:
 
     discrete_reference = discrete_expected_diffusion(config)
     analytic_variance = multinomial_marginal_variance(config)
-    rows: list[dict[str, float | int]] = []
+    rows: list[dict[str, float | int | str]] = []
 
     for mode_count in requested_modes:
-        ensemble = run_eigenmarkov_ensemble(
+        ensemble = _run_selected_modal(
             config,
-            n_runs=args.runs,
+            args,
             n_modes=mode_count,
-            modal_particle_weight=args.modal_particle_weight,
-            initialization=args.initialization,
             seed=args.seed + mode_count,
         )
         diagnostics = summarize_ensemble(
@@ -235,9 +309,11 @@ def run_sweep(args: argparse.Namespace) -> int:
         )
         diagnostic_values = diagnostics.as_dict()
         diagnostic_values.pop("covariance_relative_frobenius_error", None)
-        row: dict[str, float | int] = {
+        row: dict[str, float | int | str] = {
+            "modal_model": args.modal_model,
             "n_modes": mode_count,
             **diagnostic_values,
+            **_bank_diagnostics(ensemble),
         }
         mean = ensemble.mean
         for start_time in valid_start_times:
@@ -249,7 +325,7 @@ def run_sweep(args: argparse.Namespace) -> int:
             )
         rows.append(row)
         print(
-            f"modes={mode_count:4d}  "
+            f"model={args.modal_model:24s}  modes={mode_count:4d}  "
             f"mean_l2={diagnostics.mean_relative_l2_error:.6g}  "
             f"variance_l2={diagnostics.variance_relative_l2_error:.6g}  "
             f"negative_mass={diagnostics.mean_negative_mass_fraction:.6g}"
@@ -257,8 +333,13 @@ def run_sweep(args: argparse.Namespace) -> int:
 
     csv_path = Path(args.csv_output)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -275,9 +356,120 @@ def run_sweep(args: argparse.Namespace) -> int:
         ],
         negative_entry_fractions=[float(row["negative_entry_fraction"]) for row in rows],
         output_path=args.output,
+        model_label=args.modal_model,
     )
     print(f"Saved {csv_path}")
     print(f"Saved {figure}")
+    return 0
+
+
+def run_model_comparison(args: argparse.Namespace) -> int:
+    config = _config_from_args(args)
+    n_modes = config.n_nodes if args.modes is None else args.modes
+    discrete_reference = discrete_expected_diffusion(config)
+    analytic_variance = multinomial_marginal_variance(config)
+    analytic_covariance = multinomial_marginal_covariance(config)
+    covariance_indices, covariance_times = _nearest_time_indices(
+        config.times,
+        args.covariance_times,
+        exclude_zero=True,
+    )
+
+    random_walk = run_random_walk_ensemble(
+        config,
+        n_runs=args.runs,
+        seed=args.seed,
+        method=args.random_walk_method,
+    )
+    model_runs: dict[str, np.ndarray] = {
+        f"random_walk_{args.random_walk_method}": random_walk.runs
+    }
+    ensembles: dict[str, EnsembleResult] = {}
+    for offset, model_name in enumerate(args.models, start=1):
+        ensemble = run_modal_ensemble(
+            config,
+            n_runs=args.runs,
+            model=model_name,
+            n_modes=n_modes,
+            modal_particle_weight=args.modal_particle_weight,
+            initialization=args.initialization,
+            seed=args.seed + offset,
+        )
+        ensembles[model_name] = ensemble
+        model_runs[model_name] = ensemble.runs
+
+    diagnostics: dict[str, dict[str, float | None]] = {}
+    for name, runs in model_runs.items():
+        values = summarize_ensemble(
+            discrete_reference,
+            analytic_variance,
+            runs,
+            config.n_particles,
+            reference_covariance=analytic_covariance,
+            covariance_time_indices=covariance_indices,
+        ).as_dict()
+        if name in ensembles:
+            values.update(_bank_diagnostics(ensembles[name]))
+        diagnostics[name] = values
+
+    figure = plot_model_comparison(
+        config=config,
+        discrete_reference=discrete_reference,
+        analytic_variance=analytic_variance,
+        model_runs=model_runs,
+        diagnostics=diagnostics,
+        output_path=args.output,
+        profile_step=args.profile_step,
+    )
+
+    csv_path = Path(args.csv_output)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [{"model": name, **values} for name, values in diagnostics.items()]
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    data_path = Path(args.data_output) if args.data_output else figure.with_suffix(".npz")
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    save_items: dict[str, object] = {
+        "discrete_reference": discrete_reference,
+        "analytic_variance": analytic_variance,
+        "covariance_time_indices": np.asarray(covariance_indices, dtype=int),
+        "covariance_times": np.asarray(covariance_times, dtype=float),
+        "times": config.times,
+        "positions": config.positions,
+    }
+    for name, runs in model_runs.items():
+        save_items[f"runs_{name}"] = runs
+    for name, ensemble in ensembles.items():
+        if ensemble.auxiliary:
+            for key, value in ensemble.auxiliary.items():
+                save_items[f"aux_{name}_{key}"] = value
+    np.savez_compressed(data_path, **save_items)
+
+    report = {
+        "configuration": {
+            "particles": config.n_particles,
+            "nodes": config.n_nodes,
+            "steps": config.n_steps,
+            "modes": n_modes,
+            "runs": args.runs,
+            "models": list(args.models),
+            "random_walk_method": args.random_walk_method,
+            "covariance_times": covariance_times,
+        },
+        "diagnostics": diagnostics,
+        "figure": str(figure),
+        "csv": str(csv_path),
+        "data": str(data_path),
+    }
+    print(json.dumps(report, indent=2))
     return 0
 
 
@@ -325,28 +517,23 @@ def run_random_walk_benchmark(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eigendiffusion",
-        description="Stochastic diffusion using Markov eigenmodes.",
+        description="Stochastic diffusion using independent and correlated modal models.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser(
         "validate",
-        help="Compare EigenMarkov with exact discrete, continuous, and random-walk references.",
+        help="Validate one selected modal model against analytic and random-walk references.",
     )
     _add_shared_arguments(validate)
+    _add_modal_model_argument(validate)
+    _add_covariance_arguments(validate)
     validate.add_argument("--modes", type=int, default=None)
     validate.add_argument(
         "--random-walk-method",
         choices=("naive", "multinomial"),
         default="multinomial",
         help="Random-walk implementation used for validation.",
-    )
-    validate.add_argument(
-        "--covariance-times",
-        type=float,
-        nargs="+",
-        default=[1.0, 5.0, 20.0, 100.0],
-        help="Times used for same-time spatial covariance error.",
     )
     validate.add_argument("--profile-step", type=int, default=None)
     validate.add_argument("--output", default="outputs/validation.png")
@@ -355,9 +542,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sweep = subparsers.add_parser(
         "sweep-modes",
-        help="Measure time-resolved mean, variance, and nonnegativity versus retained modes.",
+        help="Sweep retained modes for one selected modal formulation.",
     )
     _add_shared_arguments(sweep)
+    _add_modal_model_argument(sweep)
     sweep.add_argument("--modes", type=int, nargs="+", default=None)
     sweep.add_argument(
         "--error-start-times",
@@ -369,6 +557,30 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--output", default="outputs/mode_sweep.png")
     sweep.add_argument("--csv-output", default="outputs/mode_sweep.csv")
     sweep.set_defaults(handler=run_sweep)
+
+    compare = subparsers.add_parser(
+        "compare-modal-models",
+        help="Compare independent, correlated, and banked correlated modal formulations.",
+    )
+    _add_shared_arguments(compare)
+    _add_covariance_arguments(compare)
+    compare.add_argument(
+        "--models",
+        nargs="+",
+        choices=MODAL_MODEL_NAMES,
+        default=list(MODAL_MODEL_NAMES),
+    )
+    compare.add_argument("--modes", type=int, default=None)
+    compare.add_argument(
+        "--random-walk-method",
+        choices=("naive", "multinomial"),
+        default="multinomial",
+    )
+    compare.add_argument("--profile-step", type=int, default=None)
+    compare.add_argument("--output", default="outputs/modal_model_comparison.png")
+    compare.add_argument("--csv-output", default="outputs/modal_model_comparison.csv")
+    compare.add_argument("--data-output", default=None)
+    compare.set_defaults(handler=run_model_comparison)
 
     benchmark = subparsers.add_parser(
         "benchmark-random-walk",

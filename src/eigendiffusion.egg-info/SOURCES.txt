@@ -6,6 +6,7 @@ src/eigendiffusion/baselines.py
 src/eigendiffusion/benchmarking.py
 src/eigendiffusion/cli.py
 src/eigendiffusion/config.py
+src/eigendiffusion/correlated_modal.py
 src/eigendiffusion/eigenmarkov.py
 src/eigendiffusion/ensemble.py
 src/eigendiffusion/metrics.py
@@ -20,6 +21,8 @@ src/eigendiffusion.egg-info/requires.txt
 src/eigendiffusion.egg-info/top_level.txt
 tests/test_baselines.py
 tests/test_benchmarking.py
+tests/test_cli_models.py
+tests/test_correlated_modal.py
 tests/test_eigenmarkov.py
 tests/test_expected_update.py
 tests/test_metrics.py

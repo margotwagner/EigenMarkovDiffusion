@@ -1,4 +1,4 @@
-"""Plotting helpers for validation, sweeps, and benchmarks."""
+"""Plotting helpers for validation, model comparison, sweeps, and benchmarks."""
 
 from __future__ import annotations
 
@@ -13,17 +13,29 @@ from .config import DiffusionConfig
 FloatArray = NDArray[np.float64]
 
 
+def _display_name(model_name: str) -> str:
+    names = {
+        "independent_modal": "independent modal",
+        "correlated_modal": "correlated modal",
+        "banked_correlated_modal": "banked correlated modal",
+        "random_walk_multinomial": "multinomial random walk",
+        "random_walk_naive": "naive random walk",
+    }
+    return names.get(model_name, model_name.replace("_", " "))
+
+
 def plot_validation(
     config: DiffusionConfig,
     continuous_reference: FloatArray,
     discrete_reference: FloatArray,
     analytic_variance: FloatArray,
-    eigenmarkov_runs: FloatArray,
+    modal_runs: FloatArray,
     random_walk_runs: FloatArray,
     output_path: str | Path,
     profile_step: int | None = None,
+    modal_label: str = "independent modal",
 ) -> Path:
-    """Plot mean, variance, and nonnegativity diagnostics."""
+    """Plot mean, variance, and nonnegativity diagnostics for one modal model."""
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -31,15 +43,15 @@ def plot_validation(
     if not 0 <= step < config.n_steps:
         raise ValueError("profile_step must index an available timestep")
 
-    em_mean = np.mean(eigenmarkov_runs, axis=0)
-    em_std = np.std(eigenmarkov_runs, axis=0, ddof=0)
-    em_variance = np.var(eigenmarkov_runs, axis=0, ddof=0)
+    modal_mean = np.mean(modal_runs, axis=0)
+    modal_std = np.std(modal_runs, axis=0, ddof=0)
+    modal_variance = np.var(modal_runs, axis=0, ddof=0)
     rw_mean = np.mean(random_walk_runs, axis=0)
     rw_std = np.std(random_walk_runs, axis=0, ddof=0)
     rw_variance = np.var(random_walk_runs, axis=0, ddof=0)
 
-    em_negative_mass = (
-        np.clip(-eigenmarkov_runs, 0.0, None).sum(axis=-1) / config.n_particles
+    modal_negative_mass = (
+        np.clip(-modal_runs, 0.0, None).sum(axis=-1) / config.n_particles
     )
     rw_negative_mass = (
         np.clip(-random_walk_runs, 0.0, None).sum(axis=-1) / config.n_particles
@@ -48,11 +60,18 @@ def plot_validation(
     x = config.positions
     t = config.times
     impulse = config.impulse_index
+    display_label = _display_name(modal_label)
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
 
     ax = axes[0, 0]
-    ax.plot(x, continuous_reference[step], "--", label="continuous reference", linewidth=1.8)
+    ax.plot(
+        x,
+        continuous_reference[step],
+        "--",
+        label="continuous reference",
+        linewidth=1.8,
+    )
     ax.plot(x, discrete_reference[step], label="discrete expected mean", linewidth=2.2)
     ax.plot(x, rw_mean[step], label="random-walk mean", linewidth=1.8)
     ax.fill_between(
@@ -61,11 +80,11 @@ def plot_validation(
         rw_mean[step] + rw_std[step],
         alpha=0.15,
     )
-    ax.plot(x, em_mean[step], label="EigenMarkov mean", linewidth=1.8)
+    ax.plot(x, modal_mean[step], label=f"{display_label} mean", linewidth=1.8)
     ax.fill_between(
         x,
-        em_mean[step] - em_std[step],
-        em_mean[step] + em_std[step],
+        modal_mean[step] - modal_std[step],
+        modal_mean[step] + modal_std[step],
         alpha=0.15,
     )
     ax.set_title(f"Spatial mean at t = {t[step]:g} µs")
@@ -94,11 +113,11 @@ def plot_validation(
         rw_mean[:, impulse] + rw_std[:, impulse],
         alpha=0.15,
     )
-    ax.plot(t, em_mean[:, impulse], label="EigenMarkov mean", linewidth=1.8)
+    ax.plot(t, modal_mean[:, impulse], label=f"{display_label} mean", linewidth=1.8)
     ax.fill_between(
         t,
-        em_mean[:, impulse] - em_std[:, impulse],
-        em_mean[:, impulse] + em_std[:, impulse],
+        modal_mean[:, impulse] - modal_std[:, impulse],
+        modal_mean[:, impulse] + modal_std[:, impulse],
         alpha=0.15,
     )
     ax.set_title("Impulse-node mean time course")
@@ -107,9 +126,19 @@ def plot_validation(
     ax.legend(fontsize=8)
 
     ax = axes[1, 0]
-    ax.plot(x, analytic_variance[step], label="analytic multinomial variance", linewidth=2.2)
+    ax.plot(
+        x,
+        analytic_variance[step],
+        label="analytic multinomial variance",
+        linewidth=2.2,
+    )
     ax.plot(x, rw_variance[step], label="random-walk sample variance", linewidth=1.8)
-    ax.plot(x, em_variance[step], label="EigenMarkov sample variance", linewidth=1.8)
+    ax.plot(
+        x,
+        modal_variance[step],
+        label=f"{display_label} sample variance",
+        linewidth=1.8,
+    )
     ax.set_title(f"Spatial variance at t = {t[step]:g} µs")
     ax.set_xlabel("distance (µm)")
     ax.set_ylabel("particle-count variance")
@@ -117,11 +146,104 @@ def plot_validation(
 
     ax = axes[1, 1]
     ax.plot(t, np.mean(rw_negative_mass, axis=0), label="random walk", linewidth=1.8)
-    ax.plot(t, np.mean(em_negative_mass, axis=0), label="EigenMarkov", linewidth=1.8)
+    ax.plot(
+        t,
+        np.mean(modal_negative_mass, axis=0),
+        label=display_label,
+        linewidth=1.8,
+    )
     ax.set_title("Mean negative mass fraction")
     ax.set_xlabel("time (µs)")
     ax.set_ylabel("negative mass / total particles")
     ax.set_ylim(bottom=0.0)
+    ax.legend(fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output
+
+
+def plot_model_comparison(
+    config: DiffusionConfig,
+    discrete_reference: FloatArray,
+    analytic_variance: FloatArray,
+    model_runs: dict[str, FloatArray],
+    diagnostics: dict[str, dict[str, float | None]],
+    output_path: str | Path,
+    profile_step: int | None = None,
+) -> Path:
+    """Compare all modal formulations in one figure."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    step = min(config.n_steps - 1, 20) if profile_step is None else profile_step
+    if not 0 <= step < config.n_steps:
+        raise ValueError("profile_step must index an available timestep")
+
+    t = config.times
+    x = config.positions
+    impulse = config.impulse_index
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
+
+    ax = axes[0, 0]
+    ax.plot(
+        t,
+        discrete_reference[:, impulse],
+        "--",
+        linewidth=2.2,
+        label="discrete expected mean",
+    )
+    for name, runs in model_runs.items():
+        ax.plot(t, runs.mean(axis=0)[:, impulse], label=_display_name(name), linewidth=1.7)
+    ax.set_title("Impulse-node mean")
+    ax.set_xlabel("time (µs)")
+    ax.set_ylabel("particle count")
+    ax.legend(fontsize=8)
+
+    ax = axes[0, 1]
+    ax.plot(x, analytic_variance[step], "--", linewidth=2.2, label="analytic variance")
+    for name, runs in model_runs.items():
+        ax.plot(
+            x,
+            np.var(runs, axis=0, ddof=0)[step],
+            label=_display_name(name),
+            linewidth=1.7,
+        )
+    ax.set_title(f"Spatial variance at t = {t[step]:g} µs")
+    ax.set_xlabel("distance (µm)")
+    ax.set_ylabel("particle-count variance")
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 0]
+    for name, runs in model_runs.items():
+        negative_mass = np.clip(-runs, 0.0, None).sum(axis=-1) / config.n_particles
+        ax.plot(t, negative_mass.mean(axis=0), label=_display_name(name), linewidth=1.7)
+    ax.set_title("Mean negative mass fraction")
+    ax.set_xlabel("time (µs)")
+    ax.set_ylabel("negative mass / total particles")
+    ax.set_ylim(bottom=0.0)
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 1]
+    model_names = list(model_runs)
+    x_positions = np.arange(len(model_names), dtype=float)
+    width = 0.25
+    metric_specs = (
+        ("mean_relative_l2_error", "mean"),
+        ("variance_relative_l2_error", "variance"),
+        ("covariance_relative_frobenius_error", "covariance"),
+    )
+    for metric_index, (key, label) in enumerate(metric_specs):
+        values = [
+            np.nan if diagnostics[name].get(key) is None else float(diagnostics[name][key])
+            for name in model_names
+        ]
+        ax.bar(x_positions + (metric_index - 1) * width, values, width, label=label)
+    ax.set_xticks(x_positions, [_display_name(name) for name in model_names], rotation=15)
+    ax.set_ylabel("relative error (lower is better)")
+    ax.set_title("Ensemble diagnostics")
+    ax.set_yscale("log")
     ax.legend(fontsize=8)
 
     fig.tight_layout()
@@ -137,6 +259,7 @@ def plot_mode_sweep(
     negative_mass_fractions: list[float],
     negative_entry_fractions: list[float],
     output_path: str | Path,
+    model_label: str = "modal model",
 ) -> Path:
     """Plot time-resolved mean error and physicality diagnostics."""
 
@@ -157,7 +280,7 @@ def plot_mode_sweep(
     ax.plot(modes, variance_errors, marker="o")
     ax.set_xlabel("retained eigenmodes")
     ax.set_ylabel("relative L2 variance error")
-    ax.set_title("Variance accuracy")
+    ax.set_title("Variance relative error — lower is better")
 
     ax = axes[1, 0]
     ax.plot(modes, negative_mass_fractions, marker="o")
@@ -171,6 +294,7 @@ def plot_mode_sweep(
     ax.set_ylabel("fraction of entries below zero")
     ax.set_title("Nonnegativity diagnostic")
 
+    fig.suptitle(_display_name(model_label), y=1.01)
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)

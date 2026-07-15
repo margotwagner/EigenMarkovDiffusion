@@ -14,10 +14,28 @@ from .benchmarking import (
     estimate_random_walk_core_bytes,
 )
 from .config import DiffusionConfig
-from .eigenmarkov import EigenMarkovDiffusion, EigenMarkovResult
+from .correlated_modal import (
+    BankedCorrelatedModalDiffusion,
+    BankedCorrelatedModalResult,
+    CorrelatedModalDiffusion,
+    CorrelatedModalResult,
+    nearest_neighbour_transition_covariance,
+    project_to_mass_simplex,
+    sample_nearest_neighbour_gaussian_noise,
+)
+from .eigenmarkov import (
+    EigenMarkovDiffusion,
+    EigenMarkovResult,
+    IndependentModalDiffusion,
+)
 from .ensemble import (
+    MODAL_MODEL_NAMES,
     EnsembleResult,
+    ModalModelName,
+    run_banked_correlated_modal_ensemble,
+    run_correlated_modal_ensemble,
     run_eigenmarkov_ensemble,
+    run_modal_ensemble,
     run_multinomial_random_walk_ensemble,
     run_naive_random_walk_ensemble,
     run_random_walk_ensemble,
@@ -40,11 +58,18 @@ from .references import (
 )
 
 __all__ = [
+    "BankedCorrelatedModalDiffusion",
+    "BankedCorrelatedModalResult",
+    "CorrelatedModalDiffusion",
+    "CorrelatedModalResult",
     "DiffusionConfig",
     "EigenMarkovDiffusion",
     "EigenMarkovResult",
     "EnsembleDiagnostics",
     "EnsembleResult",
+    "IndependentModalDiffusion",
+    "MODAL_MODEL_NAMES",
+    "ModalModelName",
     "RandomWalkBenchmark",
     "ValidationMetrics",
     "benchmark_random_walks",
@@ -57,18 +82,24 @@ __all__ = [
     "multinomial_marginal_variance",
     "multinomial_node_probabilities",
     "multinomial_random_walk_diffusion",
+    "nearest_neighbour_transition_covariance",
     "naive_random_walk_diffusion",
     "naive_random_walk_trajectories",
+    "project_to_mass_simplex",
     "random_walk_diffusion",
     "random_walk_transition_matrix",
     "relative_l2_error_from_time",
+    "run_banked_correlated_modal_ensemble",
+    "run_correlated_modal_ensemble",
     "run_eigenmarkov_ensemble",
+    "run_modal_ensemble",
     "run_multinomial_random_walk_ensemble",
     "run_naive_random_walk_ensemble",
     "run_random_walk_ensemble",
+    "sample_nearest_neighbour_gaussian_noise",
     "summarize",
     "summarize_ensemble",
     "trajectories_to_counts",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
