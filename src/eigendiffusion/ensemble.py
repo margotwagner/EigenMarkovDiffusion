@@ -18,6 +18,7 @@ from .correlated_modal import (
     CorrelatedModalDiffusion,
 )
 from .eigenmarkov import IndependentModalDiffusion
+from .readouts import ReadoutName, apply_readout
 
 FloatArray = NDArray[np.float64]
 RandomWalkMethod = Literal["naive", "multinomial"]
@@ -183,6 +184,44 @@ def run_modal_ensemble(
         auxiliary=auxiliary,
     )
 
+
+
+def apply_readout_ensemble(
+    ensemble: EnsembleResult,
+    config: DiffusionConfig,
+    *,
+    readout: ReadoutName = "raw",
+    spatial_error_fraction: float = 0.5,
+) -> EnsembleResult:
+    """Apply an output-only readout independently to every ensemble run.
+
+    The input modal trajectories are not modified. Compact residual-balance
+    diagnostics are returned in ``auxiliary``.
+    """
+
+    processed: list[FloatArray] = []
+    residual_l1_fraction: list[FloatArray] = []
+    for run in ensemble.runs:
+        result = apply_readout(
+            run,
+            config.n_particles,
+            readout=readout,
+            spatial_error_fraction=spatial_error_fraction,
+        )
+        processed.append(result.counts)
+        residual_l1_fraction.append(
+            result.residual_l1 / float(config.n_particles)
+        )
+
+    auxiliary = {} if ensemble.auxiliary is None else dict(ensemble.auxiliary)
+    auxiliary["readout_residual_l1_fraction"] = np.stack(
+        residual_l1_fraction
+    ).astype(float, copy=False)
+    return EnsembleResult(
+        runs=np.stack(processed).astype(float, copy=False),
+        model_name=f"{ensemble.model_name}+{readout}",
+        auxiliary=auxiliary,
+    )
 
 
 def run_eigenmarkov_ensemble(

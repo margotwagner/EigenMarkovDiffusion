@@ -32,6 +32,7 @@ from .ensemble import (
     MODAL_MODEL_NAMES,
     EnsembleResult,
     ModalModelName,
+    apply_readout_ensemble,
     run_banked_correlated_modal_ensemble,
     run_correlated_modal_ensemble,
     run_eigenmarkov_ensemble,
@@ -47,6 +48,18 @@ from .metrics import (
     relative_l2_error_from_time,
     summarize,
     summarize_ensemble,
+)
+from .readouts import (
+    READOUT_NAMES,
+    ReadoutName,
+    ReadoutResult,
+    apply_readout,
+    integer_simplex_quantize,
+    neighbor_delta_sigma_readout,
+    raw_readout,
+    readout_constraint_diagnostics,
+    simplex_bank_readout,
+    temporal_delta_sigma_readout,
 )
 from .references import (
     continuous_expected_diffusion,
@@ -71,6 +84,17 @@ __all__ = [
     "MODAL_MODEL_NAMES",
     "ModalModelName",
     "RandomWalkBenchmark",
+    "READOUT_NAMES",
+    "ReadoutName",
+    "ReadoutResult",
+    "apply_readout",
+    "apply_readout_ensemble",
+    "integer_simplex_quantize",
+    "neighbor_delta_sigma_readout",
+    "raw_readout",
+    "readout_constraint_diagnostics",
+    "simplex_bank_readout",
+    "temporal_delta_sigma_readout",
     "ValidationMetrics",
     "benchmark_random_walks",
     "continuous_expected_diffusion",
@@ -102,4 +126,4 @@ __all__ = [
     "trajectories_to_counts",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

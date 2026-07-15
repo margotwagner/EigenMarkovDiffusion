@@ -248,3 +248,121 @@ outputs/                  generated results; ignored by Git
   nonnegativity, mass conservation, and bank magnitude.
 - Keep `independent_modal` as the baseline until the experimental variants are
   demonstrably better.
+
+## Output-only bank and Delta-Sigma readouts
+
+Version 0.5 separates the modal dynamics from the physical readout. The
+existing modal models are preserved, including `independent_modal` unchanged.
+The new `--readout` option is applied only after a raw modal trajectory has
+been generated:
+
+```text
+raw
+simplex_bank
+delta_sigma_temporal
+delta_sigma_neighbor
+```
+
+The two Delta-Sigma readouts produce nonnegative integer counts that sum to the
+specified particle total at every saved time. They shape and carry quantization
+error but do not automatically guarantee the correct random-walk distribution;
+mean, variance, covariance, and residual-balance diagnostics must still be
+compared.
+
+See [`docs/DELTA_SIGMA_READOUTS.md`](docs/DELTA_SIGMA_READOUTS.md).
+
+### Compare all readouts without overwriting previous outputs
+
+```bash
+mkdir -p outputs/delta_sigma_readouts/comparisons
+
+python -m eigendiffusion compare-readouts \
+  --modal-model correlated_modal \
+  --readouts raw simplex_bank delta_sigma_temporal delta_sigma_neighbor \
+  --spatial-error-fraction 0.5 \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 100 \
+  --modes 101 \
+  --random-walk-method multinomial \
+  --covariance-times 1 5 20 50 100 \
+  --seed 0 \
+  --output outputs/delta_sigma_readouts/comparisons/correlated_full_readout_comparison.png \
+  --csv-output outputs/delta_sigma_readouts/comparisons/correlated_full_readout_comparison.csv \
+  --data-output outputs/delta_sigma_readouts/comparisons/correlated_full_readout_comparison.npz
+```
+
+The command generates the raw correlated-modal ensemble once and applies every
+readout to the same trajectories, making the comparison paired and preserving
+the prior `outputs/modal_models/` results.
+
+### Validate each readout separately
+
+```bash
+mkdir -p \
+  outputs/delta_sigma_readouts/correlated_modal/raw \
+  outputs/delta_sigma_readouts/correlated_modal/simplex_bank \
+  outputs/delta_sigma_readouts/correlated_modal/delta_sigma_temporal \
+  outputs/delta_sigma_readouts/correlated_modal/delta_sigma_neighbor
+```
+
+Temporal Delta-Sigma:
+
+```bash
+python -m eigendiffusion validate \
+  --modal-model correlated_modal \
+  --readout delta_sigma_temporal \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 100 \
+  --modes 101 \
+  --random-walk-method multinomial \
+  --covariance-times 1 5 20 50 100 \
+  --seed 0 \
+  --output outputs/delta_sigma_readouts/correlated_modal/delta_sigma_temporal/full_validation.png \
+  --data-output outputs/delta_sigma_readouts/correlated_modal/delta_sigma_temporal/full_validation.npz
+```
+
+Neighbor-coupled Delta-Sigma:
+
+```bash
+python -m eigendiffusion validate \
+  --modal-model correlated_modal \
+  --readout delta_sigma_neighbor \
+  --spatial-error-fraction 0.5 \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 100 \
+  --modes 101 \
+  --random-walk-method multinomial \
+  --covariance-times 1 5 20 50 100 \
+  --seed 0 \
+  --output outputs/delta_sigma_readouts/correlated_modal/delta_sigma_neighbor/full_validation_alpha0p5.png \
+  --data-output outputs/delta_sigma_readouts/correlated_modal/delta_sigma_neighbor/full_validation_alpha0p5.npz
+```
+
+### Sweep retained modes with a fixed readout
+
+```bash
+mkdir -p outputs/delta_sigma_readouts/sweeps
+
+python -m eigendiffusion sweep-modes \
+  --modal-model correlated_modal \
+  --readout delta_sigma_temporal \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --modes 2 5 10 20 50 75 101 \
+  --runs 100 \
+  --error-start-times 0 1 5 10 20 \
+  --seed 0 \
+  --output outputs/delta_sigma_readouts/sweeps/correlated_temporal_delta_sigma_mode_sweep.png \
+  --csv-output outputs/delta_sigma_readouts/sweeps/correlated_temporal_delta_sigma_mode_sweep.csv
+```

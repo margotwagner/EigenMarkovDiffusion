@@ -20,7 +20,14 @@ def _display_name(model_name: str) -> str:
         "banked_correlated_modal": "banked correlated modal",
         "random_walk_multinomial": "multinomial random walk",
         "random_walk_naive": "naive random walk",
+        "raw": "raw readout",
+        "simplex_bank": "simplex-bank readout",
+        "delta_sigma_temporal": "temporal ΔΣ readout",
+        "delta_sigma_neighbor": "neighbor ΔΣ readout",
     }
+    if "+" in model_name:
+        model, readout = model_name.split("+", maxsplit=1)
+        return f"{names.get(model, model.replace('_', ' '))} + {names.get(readout, readout.replace('_', ' '))}"
     return names.get(model_name, model_name.replace("_", " "))
 
 
