@@ -366,3 +366,53 @@ python -m eigendiffusion sweep-modes \
   --output outputs/delta_sigma_readouts/sweeps/correlated_temporal_delta_sigma_mode_sweep.png \
   --csv-output outputs/delta_sigma_readouts/sweeps/correlated_temporal_delta_sigma_mode_sweep.csv
 ```
+
+## Adaptive full-to-reduced handoff
+
+A fixed reduced basis struggles with the initial impulse because the impulse
+contains high spatial frequencies. The `handoff_correlated_modal` option keeps
+more modes during the early transient and projects to a smaller nested basis at
+a chosen time.
+
+Validate one handoff configuration:
+
+```bash
+python -m eigendiffusion validate \
+  --modal-model handoff_correlated_modal \
+  --initial-modes 101 \
+  --modes 50 \
+  --handoff-time 10 \
+  --readout raw \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 100 \
+  --random-walk-method multinomial \
+  --covariance-times 1 5 20 50 100 \
+  --seed 0 \
+  --output outputs/adaptive_handoff/handoff_t10_m50/validation.png \
+  --data-output outputs/adaptive_handoff/handoff_t10_m50/validation.npz
+```
+
+Sweep handoff times and final mode counts:
+
+```bash
+python -m eigendiffusion sweep-handoff \
+  --initial-modes 101 \
+  --final-modes 10 20 30 50 \
+  --handoff-times 1 5 10 20 \
+  --readout raw \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 100 \
+  --error-start-times 0 5 10 20 \
+  --late-start-time 20 \
+  --seed 0 \
+  --output outputs/adaptive_handoff/sweeps/handoff_sweep.png \
+  --csv-output outputs/adaptive_handoff/sweeps/handoff_sweep.csv
+```
+
+See `docs/ADAPTIVE_HANDOFF.md` for the equations, diagnostics, and limitations.

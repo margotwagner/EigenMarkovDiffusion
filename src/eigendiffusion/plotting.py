@@ -18,6 +18,7 @@ def _display_name(model_name: str) -> str:
         "independent_modal": "independent modal",
         "correlated_modal": "correlated modal",
         "banked_correlated_modal": "banked correlated modal",
+        "handoff_correlated_modal": "handoff correlated modal",
         "random_walk_multinomial": "multinomial random walk",
         "random_walk_naive": "naive random walk",
         "raw": "raw readout",
@@ -302,6 +303,65 @@ def plot_mode_sweep(
     ax.set_title("Nonnegativity diagnostic")
 
     fig.suptitle(_display_name(model_label), y=1.01)
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output
+
+
+
+def plot_handoff_sweep(
+    rows: list[dict[str, float | int | str | None]],
+    final_modes: list[int],
+    handoff_times: list[float],
+    late_start_time: float,
+    output_path: str | Path,
+    readout_label: str = "raw",
+) -> Path:
+    """Plot full-to-reduced handoff accuracy over times and final dimensions."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    late_key = (
+        f"mean_relative_l2_t_ge_{late_start_time:g}us"
+        .replace("-", "m")
+        .replace(".", "p")
+    )
+
+    by_pair = {
+        (float(row["requested_handoff_time"]), int(row["final_n_modes"])): row
+        for row in rows
+    }
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0))
+
+    panels = (
+        ("mean_relative_l2_error", "All-time mean error", "relative L2 mean error"),
+        (late_key, f"Mean error for t ≥ {late_start_time:g} µs", "relative L2 mean error"),
+        ("variance_relative_l2_error", "Variance error", "relative L2 variance error"),
+        (
+            "mean_handoff_projection_relative_l2",
+            "One-time handoff projection error",
+            "relative L2 projection error",
+        ),
+    )
+
+    for ax, (metric, title, ylabel) in zip(axes.ravel(), panels, strict=True):
+        for handoff_time in handoff_times:
+            values = []
+            for mode_count in final_modes:
+                row = by_pair[(float(handoff_time), int(mode_count))]
+                value = row.get(metric)
+                values.append(np.nan if value is None else float(value))
+            ax.plot(final_modes, values, marker="o", label=f"handoff {handoff_time:g} µs")
+        ax.set_xlabel("final retained eigenmodes")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.legend(fontsize=8)
+
+    fig.suptitle(
+        f"Full-to-reduced correlated modal handoff + {_display_name(readout_label)}",
+        y=1.01,
+    )
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)

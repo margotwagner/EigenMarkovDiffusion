@@ -25,6 +25,7 @@ from .metrics import (
     summarize_ensemble,
 )
 from .plotting import (
+    plot_handoff_sweep,
     plot_mode_sweep,
     plot_model_comparison,
     plot_random_walk_benchmark,
@@ -71,6 +72,27 @@ def _add_modal_model_argument(parser: argparse.ArgumentParser) -> None:
         help=(
             "Modal formulation to run. independent_modal is the unchanged original "
             "EigenMarkov model."
+        ),
+    )
+
+
+def _add_handoff_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--initial-modes",
+        type=int,
+        default=None,
+        help=(
+            "Initial high-rank basis for handoff_correlated_modal. "
+            "Defaults to all spatial modes."
+        ),
+    )
+    parser.add_argument(
+        "--handoff-time",
+        type=float,
+        default=10.0,
+        help=(
+            "Time in microseconds at which handoff_correlated_modal projects "
+            "from the initial basis to --modes final modes."
         ),
     )
 
@@ -158,6 +180,20 @@ def _bank_diagnostics(ensemble: EnsembleResult) -> dict[str, float]:
     }
 
 
+def _handoff_diagnostics(ensemble: EnsembleResult) -> dict[str, float]:
+    if not ensemble.auxiliary or "handoff_projection_relative_l2" not in ensemble.auxiliary:
+        return {}
+    values = ensemble.auxiliary["handoff_projection_relative_l2"]
+    diagnostics = {
+        "mean_handoff_projection_relative_l2": float(np.mean(values)),
+        "maximum_handoff_projection_relative_l2": float(np.max(values)),
+    }
+    work = ensemble.auxiliary.get("handoff_modal_update_fraction_of_full")
+    if work is not None:
+        diagnostics["handoff_modal_update_fraction_of_full"] = float(np.mean(work))
+    return diagnostics
+
+
 def _readout_diagnostics(ensemble: EnsembleResult, total_particles: int) -> dict[str, float]:
     values = readout_constraint_diagnostics(ensemble.runs, total_particles)
     if ensemble.auxiliary and "readout_residual_l1_fraction" in ensemble.auxiliary:
@@ -206,6 +242,8 @@ def _run_selected_modal(
         n_modes=n_modes,
         modal_particle_weight=args.modal_particle_weight,
         initialization=args.initialization,
+        initial_n_modes=args.initial_modes,
+        handoff_time=args.handoff_time,
         seed=seed,
     )
 
@@ -295,6 +333,7 @@ def run_validation(args: argparse.Namespace) -> int:
 
     modal_report = modal_metrics.as_dict()
     modal_report.update(_bank_diagnostics(raw_modal))
+    modal_report.update(_handoff_diagnostics(raw_modal))
     modal_report.update(_readout_diagnostics(modal, config.n_particles))
     report = {
         "configuration": {
@@ -306,6 +345,8 @@ def run_validation(args: argparse.Namespace) -> int:
             "length": config.length,
             "diffusion_coefficient": config.diffusion_coefficient,
             "modes": n_modes,
+            "initial_modes": args.initial_modes,
+            "handoff_time": args.handoff_time,
             "runs": args.runs,
             "modal_model": args.modal_model,
             "readout": args.readout,
@@ -377,6 +418,7 @@ def run_sweep(args: argparse.Namespace) -> int:
             "n_modes": mode_count,
             **diagnostic_values,
             **_bank_diagnostics(raw_ensemble),
+            **_handoff_diagnostics(raw_ensemble),
             **_readout_diagnostics(ensemble, config.n_particles),
         }
         mean = ensemble.mean
@@ -457,6 +499,8 @@ def run_model_comparison(args: argparse.Namespace) -> int:
             n_modes=n_modes,
             modal_particle_weight=args.modal_particle_weight,
             initialization=args.initialization,
+            initial_n_modes=args.initial_modes,
+            handoff_time=args.handoff_time,
             seed=args.seed + offset,
         )
         ensembles[model_name] = ensemble
@@ -474,6 +518,7 @@ def run_model_comparison(args: argparse.Namespace) -> int:
         ).as_dict()
         if name in ensembles:
             values.update(_bank_diagnostics(ensembles[name]))
+            values.update(_handoff_diagnostics(ensembles[name]))
         diagnostics[name] = values
 
     figure = plot_model_comparison(
@@ -564,6 +609,8 @@ def run_readout_comparison(args: argparse.Namespace) -> int:
         n_modes=n_modes,
         modal_particle_weight=args.modal_particle_weight,
         initialization=args.initialization,
+        initial_n_modes=args.initial_modes,
+        handoff_time=args.handoff_time,
         seed=args.seed + 1,
     )
 
@@ -659,6 +706,102 @@ def run_readout_comparison(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_handoff_sweep(args: argparse.Namespace) -> int:
+    """Sweep handoff times and final mode counts for adaptive correlated diffusion."""
+
+    config = _config_from_args(args)
+    initial_modes = config.n_nodes if args.initial_modes is None else args.initial_modes
+    final_modes = sorted(set(args.final_modes))
+    handoff_times = sorted(set(float(value) for value in args.handoff_times))
+    for mode_count in final_modes:
+        if not 1 <= mode_count <= initial_modes:
+            raise ValueError(
+                f"final mode count {mode_count} must lie in [1, {initial_modes}]"
+            )
+    for handoff_time in handoff_times:
+        if handoff_time < config.times[0] - 1e-12 or handoff_time > config.times[-1] + 1e-12:
+            raise ValueError(
+                f"handoff time {handoff_time:g} is outside the simulated range"
+            )
+
+    discrete_reference = discrete_expected_diffusion(config)
+    analytic_variance = multinomial_marginal_variance(config)
+    rows: list[dict[str, float | int | str]] = []
+
+    for handoff_time in handoff_times:
+        for final_mode_count in final_modes:
+            raw = run_modal_ensemble(
+                config,
+                n_runs=args.runs,
+                model="handoff_correlated_modal",
+                n_modes=final_mode_count,
+                initial_n_modes=initial_modes,
+                handoff_time=handoff_time,
+                seed=args.seed + int(round(1000 * handoff_time)) + final_mode_count,
+            )
+            ensemble = apply_readout_ensemble(
+                raw,
+                config,
+                readout=args.readout,
+                spatial_error_fraction=args.spatial_error_fraction,
+            )
+            diagnostics = summarize_ensemble(
+                discrete_reference,
+                analytic_variance,
+                ensemble.runs,
+                config.n_particles,
+            )
+            row: dict[str, float | int | str] = {
+                "modal_model": "handoff_correlated_modal",
+                "readout": args.readout,
+                "initial_n_modes": initial_modes,
+                "final_n_modes": final_mode_count,
+                "requested_handoff_time": handoff_time,
+                **diagnostics.as_dict(),
+                **_handoff_diagnostics(raw),
+                **_readout_diagnostics(ensemble, config.n_particles),
+            }
+            for start_time in args.error_start_times:
+                if start_time <= config.times[-1] + 1e-12:
+                    row[_time_column(float(start_time))] = relative_l2_error_from_time(
+                        discrete_reference,
+                        ensemble.mean,
+                        config.times,
+                        float(start_time),
+                    )
+            rows.append(row)
+            print(
+                f"handoff={handoff_time:6g} us  final_modes={final_mode_count:4d}  "
+                f"mean_l2={diagnostics.mean_relative_l2_error:.6g}  "
+                f"variance_l2={diagnostics.variance_relative_l2_error:.6g}  "
+                f"negative_mass={diagnostics.mean_negative_mass_fraction:.6g}"
+            )
+
+    csv_path = Path(args.csv_output)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    figure = plot_handoff_sweep(
+        rows=rows,
+        final_modes=final_modes,
+        handoff_times=handoff_times,
+        late_start_time=args.late_start_time,
+        output_path=args.output,
+        readout_label=args.readout,
+    )
+    print(f"Saved {csv_path}")
+    print(f"Saved {figure}")
+    return 0
+
+
 def run_random_walk_benchmark(args: argparse.Namespace) -> int:
     base_config = DiffusionConfig(
         n_particles=args.particle_counts[0],
@@ -713,6 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_shared_arguments(validate)
     _add_modal_model_argument(validate)
+    _add_handoff_arguments(validate)
     _add_readout_argument(validate)
     _add_covariance_arguments(validate)
     validate.add_argument("--modes", type=int, default=None)
@@ -733,6 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_shared_arguments(sweep)
     _add_modal_model_argument(sweep)
+    _add_handoff_arguments(sweep)
     _add_readout_argument(sweep)
     sweep.add_argument("--modes", type=int, nargs="+", default=None)
     sweep.add_argument(
@@ -751,12 +896,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compare independent, correlated, and banked correlated modal formulations.",
     )
     _add_shared_arguments(compare)
+    _add_handoff_arguments(compare)
     _add_covariance_arguments(compare)
     compare.add_argument(
         "--models",
         nargs="+",
         choices=MODAL_MODEL_NAMES,
-        default=list(MODAL_MODEL_NAMES),
+        default=[
+            "independent_modal",
+            "correlated_modal",
+            "banked_correlated_modal",
+        ],
     )
     compare.add_argument("--modes", type=int, default=None)
     compare.add_argument(
@@ -776,6 +926,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_shared_arguments(compare_readouts)
     _add_modal_model_argument(compare_readouts)
+    _add_handoff_arguments(compare_readouts)
     _add_covariance_arguments(compare_readouts)
     compare_readouts.add_argument(
         "--readouts",
@@ -805,6 +956,52 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare_readouts.add_argument("--data-output", default=None)
     compare_readouts.set_defaults(handler=run_readout_comparison)
+
+    handoff_sweep = subparsers.add_parser(
+        "sweep-handoff",
+        help="Sweep full-to-reduced handoff times and final correlated mode counts.",
+    )
+    _add_shared_arguments(handoff_sweep)
+    handoff_sweep.add_argument(
+        "--initial-modes",
+        type=int,
+        default=None,
+        help="Initial high-rank basis; defaults to all spatial modes.",
+    )
+    _add_readout_argument(handoff_sweep)
+    handoff_sweep.add_argument(
+        "--final-modes",
+        type=int,
+        nargs="+",
+        default=[10, 20, 30, 50],
+    )
+    handoff_sweep.add_argument(
+        "--handoff-times",
+        type=float,
+        nargs="+",
+        default=[1.0, 5.0, 10.0, 20.0],
+    )
+    handoff_sweep.add_argument(
+        "--error-start-times",
+        type=float,
+        nargs="+",
+        default=[0.0, 5.0, 10.0, 20.0],
+    )
+    handoff_sweep.add_argument(
+        "--late-start-time",
+        type=float,
+        default=20.0,
+        help="Evaluation window shown as the late-time mean-error panel.",
+    )
+    handoff_sweep.add_argument(
+        "--output",
+        default="outputs/adaptive_handoff/handoff_sweep.png",
+    )
+    handoff_sweep.add_argument(
+        "--csv-output",
+        default="outputs/adaptive_handoff/handoff_sweep.csv",
+    )
+    handoff_sweep.set_defaults(handler=run_handoff_sweep)
 
     benchmark = subparsers.add_parser(
         "benchmark-random-walk",

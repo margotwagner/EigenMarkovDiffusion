@@ -19,6 +19,8 @@ from .correlated_modal import (
     BankedCorrelatedModalResult,
     CorrelatedModalDiffusion,
     CorrelatedModalResult,
+    HandoffCorrelatedModalDiffusion,
+    HandoffCorrelatedModalResult,
     nearest_neighbour_transition_covariance,
     project_to_mass_simplex,
     sample_nearest_neighbour_gaussian_noise,
@@ -36,6 +38,7 @@ from .ensemble import (
     run_banked_correlated_modal_ensemble,
     run_correlated_modal_ensemble,
     run_eigenmarkov_ensemble,
+    run_handoff_correlated_modal_ensemble,
     run_modal_ensemble,
     run_multinomial_random_walk_ensemble,
     run_naive_random_walk_ensemble,
@@ -75,6 +78,8 @@ __all__ = [
     "BankedCorrelatedModalResult",
     "CorrelatedModalDiffusion",
     "CorrelatedModalResult",
+    "HandoffCorrelatedModalDiffusion",
+    "HandoffCorrelatedModalResult",
     "DiffusionConfig",
     "EigenMarkovDiffusion",
     "EigenMarkovResult",
@@ -116,6 +121,7 @@ __all__ = [
     "run_banked_correlated_modal_ensemble",
     "run_correlated_modal_ensemble",
     "run_eigenmarkov_ensemble",
+    "run_handoff_correlated_modal_ensemble",
     "run_modal_ensemble",
     "run_multinomial_random_walk_ensemble",
     "run_naive_random_walk_ensemble",
@@ -126,4 +132,4 @@ __all__ = [
     "trajectories_to_counts",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

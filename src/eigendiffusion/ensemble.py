@@ -16,6 +16,7 @@ from .config import DiffusionConfig
 from .correlated_modal import (
     BankedCorrelatedModalDiffusion,
     CorrelatedModalDiffusion,
+    HandoffCorrelatedModalDiffusion,
 )
 from .eigenmarkov import IndependentModalDiffusion
 from .readouts import ReadoutName, apply_readout
@@ -26,11 +27,13 @@ ModalModelName = Literal[
     "independent_modal",
     "correlated_modal",
     "banked_correlated_modal",
+    "handoff_correlated_modal",
 ]
 MODAL_MODEL_NAMES: tuple[ModalModelName, ...] = (
     "independent_modal",
     "correlated_modal",
     "banked_correlated_modal",
+    "handoff_correlated_modal",
 )
 
 
@@ -133,6 +136,8 @@ def run_modal_ensemble(
     n_modes: int | None = None,
     modal_particle_weight: float = 1.0,
     initialization: str = "nearest",
+    initial_n_modes: int | None = None,
+    handoff_time: float = 10.0,
     seed: int = 0,
 ) -> EnsembleResult:
     """Run one named modal model repeatedly.
@@ -156,6 +161,14 @@ def run_modal_ensemble(
         simulator = CorrelatedModalDiffusion(config=config, n_modes=n_modes)
     elif model == "banked_correlated_modal":
         simulator = BankedCorrelatedModalDiffusion(config=config, n_modes=n_modes)
+    elif model == "handoff_correlated_modal":
+        final_n_modes = config.n_nodes if n_modes is None else int(n_modes)
+        simulator = HandoffCorrelatedModalDiffusion(
+            config=config,
+            final_n_modes=final_n_modes,
+            initial_n_modes=initial_n_modes,
+            handoff_time=handoff_time,
+        )
     else:
         allowed = ", ".join(MODAL_MODEL_NAMES)
         raise ValueError(f"unknown modal model {model!r}; choose one of: {allowed}")
@@ -163,6 +176,8 @@ def run_modal_ensemble(
     child_sequences = np.random.SeedSequence(seed).spawn(n_runs)
     spatial_runs: list[FloatArray] = []
     bank_l1_fraction_runs: list[FloatArray] = []
+    handoff_projection_errors: list[float] = []
+    handoff_modal_work_fractions: list[float] = []
 
     for sequence in child_sequences:
         result = simulator.run(rng=np.random.default_rng(sequence))
@@ -171,12 +186,24 @@ def run_modal_ensemble(
             bank_l1_fraction_runs.append(
                 np.abs(result.bank_balances).sum(axis=-1) / float(config.n_particles)
             )
+        elif model == "handoff_correlated_modal":
+            handoff_projection_errors.append(result.handoff_projection_relative_l2)
+            handoff_modal_work_fractions.append(result.modal_update_fraction_of_full)
 
     auxiliary: dict[str, FloatArray] | None = None
     if bank_l1_fraction_runs:
         auxiliary = {
             "bank_l1_fraction": np.stack(bank_l1_fraction_runs).astype(float, copy=False)
         }
+    if handoff_projection_errors:
+        if auxiliary is None:
+            auxiliary = {}
+        auxiliary["handoff_projection_relative_l2"] = np.asarray(
+            handoff_projection_errors, dtype=float
+        )
+        auxiliary["handoff_modal_update_fraction_of_full"] = np.asarray(
+            handoff_modal_work_fractions, dtype=float
+        )
 
     return EnsembleResult(
         runs=np.stack(spatial_runs).astype(float, copy=False),
@@ -221,6 +248,29 @@ def apply_readout_ensemble(
         runs=np.stack(processed).astype(float, copy=False),
         model_name=f"{ensemble.model_name}+{readout}",
         auxiliary=auxiliary,
+    )
+
+
+
+def run_handoff_correlated_modal_ensemble(
+    config: DiffusionConfig,
+    n_runs: int,
+    *,
+    final_n_modes: int,
+    handoff_time: float,
+    initial_n_modes: int | None = None,
+    seed: int = 0,
+) -> EnsembleResult:
+    """Run the high-rank-to-reduced correlated modal model repeatedly."""
+
+    return run_modal_ensemble(
+        config,
+        n_runs=n_runs,
+        model="handoff_correlated_modal",
+        n_modes=final_n_modes,
+        initial_n_modes=initial_n_modes,
+        handoff_time=handoff_time,
+        seed=seed,
     )
 
 

@@ -1,0 +1,1006 @@
+diff -ruN a/docs/ADAPTIVE_HANDOFF.md b/docs/ADAPTIVE_HANDOFF.md
+--- a/docs/ADAPTIVE_HANDOFF.md	1970-01-01 00:00:00.000000000 +0000
++++ b/docs/ADAPTIVE_HANDOFF.md	2026-07-15 20:40:45.068143978 +0000
+@@ -0,0 +1,111 @@
++# Adaptive full-to-reduced modal handoff
++
++This update adds one new modal dynamics option:
++
++```text
++handoff_correlated_modal
++```
++
++The existing models and readouts are unchanged.
++
++## Motivation
++
++A spatial impulse contains high-frequency diffusion modes. Those modes are
++important during the first few microseconds but decay rapidly. A fixed small
++basis therefore performs poorly at the start even when it is accurate later.
++
++The handoff model runs a high-rank correlated modal transient and then projects
++the current state into a smaller nested eigenbasis:
++
++\[
++\mathbf m_H(t+\Delta t)
++= (I-\Delta t\Lambda_H)\mathbf m_H(t)+\eta_H(t),
++\qquad t < t_h,
++\]
++
++\[
++\mathbf m_L(t_h)=V_L^\top V_H\mathbf m_H(t_h),
++\]
++
++\[
++\mathbf m_L(t+\Delta t)
++= (I-\Delta t\Lambda_L)\mathbf m_L(t)+\eta_L(t),
++\qquad t \ge t_h.
++\]
++
++Here `initial_n_modes` defines the early high-rank basis, `final_n_modes`
++defines the reduced basis, and `handoff_time` defines the projection time.
++The correlated spatial noise construction is unchanged on either side of the
++handoff.
++
++The projection error is reported explicitly. No bank or Delta-Sigma readout is
++used to hide omitted-mode error unless one is requested separately through the
++existing `--readout` option.
++
++## Files changed
++
++- `src/eigendiffusion/correlated_modal.py`
++  - adds `HandoffCorrelatedModalDiffusion`
++  - adds `HandoffCorrelatedModalResult`
++- `src/eigendiffusion/ensemble.py`
++  - adds `handoff_correlated_modal` to the model registry
++  - adds `run_handoff_correlated_modal_ensemble`
++  - reports handoff projection error and an approximate modal-update work fraction
++- `src/eigendiffusion/cli.py`
++  - adds `--initial-modes` and `--handoff-time`
++  - adds the `sweep-handoff` command
++- `src/eigendiffusion/plotting.py`
++  - adds the handoff sweep figure
++- `src/eigendiffusion/__init__.py`
++  - exports the new model and runner
++- `tests/test_handoff_correlated_modal.py`
++- `tests/test_cli_handoff.py`
++
++## Single validation
++
++```bash
++python -m eigendiffusion validate \
++  --modal-model handoff_correlated_modal \
++  --initial-modes 101 \
++  --modes 50 \
++  --handoff-time 10 \
++  --readout raw \
++  --particles 5275 \
++  --nodes 101 \
++  --steps 101 \
++  --impulse-index 59 \
++  --runs 100 \
++  --random-walk-method multinomial \
++  --covariance-times 1 5 20 50 100 \
++  --seed 0 \
++  --output outputs/adaptive_handoff/handoff_t10_m50/validation.png \
++  --data-output outputs/adaptive_handoff/handoff_t10_m50/validation.npz
++```
++
++## Recommended sweep
++
++```bash
++python -m eigendiffusion sweep-handoff \
++  --initial-modes 101 \
++  --final-modes 10 20 30 50 \
++  --handoff-times 1 5 10 20 \
++  --readout raw \
++  --particles 5275 \
++  --nodes 101 \
++  --steps 101 \
++  --impulse-index 59 \
++  --runs 100 \
++  --error-start-times 0 5 10 20 \
++  --late-start-time 20 \
++  --seed 0 \
++  --output outputs/adaptive_handoff/sweeps/handoff_sweep.png \
++  --csv-output outputs/adaptive_handoff/sweeps/handoff_sweep.csv
++```
++
++## Important interpretation
++
++`handoff_modal_update_fraction_of_full` estimates only the relative number of
++modal coordinates updated. The current correlated noise sampler still touches
++the full spatial grid to construct the physical covariance, so this metric is
++not a full runtime claim. Actual wall-clock benchmarking should be performed
++before making an efficiency claim.
+diff -ruN a/src/eigendiffusion/__init__.py b/src/eigendiffusion/__init__.py
+--- a/src/eigendiffusion/__init__.py	2026-07-15 20:40:44.953071411 +0000
++++ b/src/eigendiffusion/__init__.py	2026-07-15 20:40:45.031537826 +0000
+@@ -19,6 +19,8 @@
+     BankedCorrelatedModalResult,
+     CorrelatedModalDiffusion,
+     CorrelatedModalResult,
++    HandoffCorrelatedModalDiffusion,
++    HandoffCorrelatedModalResult,
+     nearest_neighbour_transition_covariance,
+     project_to_mass_simplex,
+     sample_nearest_neighbour_gaussian_noise,
+@@ -36,6 +38,7 @@
+     run_banked_correlated_modal_ensemble,
+     run_correlated_modal_ensemble,
+     run_eigenmarkov_ensemble,
++    run_handoff_correlated_modal_ensemble,
+     run_modal_ensemble,
+     run_multinomial_random_walk_ensemble,
+     run_naive_random_walk_ensemble,
+@@ -75,6 +78,8 @@
+     "BankedCorrelatedModalResult",
+     "CorrelatedModalDiffusion",
+     "CorrelatedModalResult",
++    "HandoffCorrelatedModalDiffusion",
++    "HandoffCorrelatedModalResult",
+     "DiffusionConfig",
+     "EigenMarkovDiffusion",
+     "EigenMarkovResult",
+@@ -116,6 +121,7 @@
+     "run_banked_correlated_modal_ensemble",
+     "run_correlated_modal_ensemble",
+     "run_eigenmarkov_ensemble",
++    "run_handoff_correlated_modal_ensemble",
+     "run_modal_ensemble",
+     "run_multinomial_random_walk_ensemble",
+     "run_naive_random_walk_ensemble",
+@@ -126,4 +132,4 @@
+     "trajectories_to_counts",
+ ]
+ 
+-__version__ = "0.5.0"
++__version__ = "0.6.0"
+diff -ruN a/src/eigendiffusion/cli.py b/src/eigendiffusion/cli.py
+--- a/src/eigendiffusion/cli.py	2026-07-15 20:40:44.967971196 +0000
++++ b/src/eigendiffusion/cli.py	2026-07-15 20:40:45.032341162 +0000
+@@ -25,6 +25,7 @@
+     summarize_ensemble,
+ )
+ from .plotting import (
++    plot_handoff_sweep,
+     plot_mode_sweep,
+     plot_model_comparison,
+     plot_random_walk_benchmark,
+@@ -75,6 +76,27 @@
+     )
+ 
+ 
++def _add_handoff_arguments(parser: argparse.ArgumentParser) -> None:
++    parser.add_argument(
++        "--initial-modes",
++        type=int,
++        default=None,
++        help=(
++            "Initial high-rank basis for handoff_correlated_modal. "
++            "Defaults to all spatial modes."
++        ),
++    )
++    parser.add_argument(
++        "--handoff-time",
++        type=float,
++        default=10.0,
++        help=(
++            "Time in microseconds at which handoff_correlated_modal projects "
++            "from the initial basis to --modes final modes."
++        ),
++    )
++
++
+ def _add_readout_argument(parser: argparse.ArgumentParser) -> None:
+     parser.add_argument(
+         "--readout",
+@@ -158,6 +180,20 @@
+     }
+ 
+ 
++def _handoff_diagnostics(ensemble: EnsembleResult) -> dict[str, float]:
++    if not ensemble.auxiliary or "handoff_projection_relative_l2" not in ensemble.auxiliary:
++        return {}
++    values = ensemble.auxiliary["handoff_projection_relative_l2"]
++    diagnostics = {
++        "mean_handoff_projection_relative_l2": float(np.mean(values)),
++        "maximum_handoff_projection_relative_l2": float(np.max(values)),
++    }
++    work = ensemble.auxiliary.get("handoff_modal_update_fraction_of_full")
++    if work is not None:
++        diagnostics["handoff_modal_update_fraction_of_full"] = float(np.mean(work))
++    return diagnostics
++
++
+ def _readout_diagnostics(ensemble: EnsembleResult, total_particles: int) -> dict[str, float]:
+     values = readout_constraint_diagnostics(ensemble.runs, total_particles)
+     if ensemble.auxiliary and "readout_residual_l1_fraction" in ensemble.auxiliary:
+@@ -206,6 +242,8 @@
+         n_modes=n_modes,
+         modal_particle_weight=args.modal_particle_weight,
+         initialization=args.initialization,
++        initial_n_modes=args.initial_modes,
++        handoff_time=args.handoff_time,
+         seed=seed,
+     )
+ 
+@@ -295,6 +333,7 @@
+ 
+     modal_report = modal_metrics.as_dict()
+     modal_report.update(_bank_diagnostics(raw_modal))
++    modal_report.update(_handoff_diagnostics(raw_modal))
+     modal_report.update(_readout_diagnostics(modal, config.n_particles))
+     report = {
+         "configuration": {
+@@ -306,6 +345,8 @@
+             "length": config.length,
+             "diffusion_coefficient": config.diffusion_coefficient,
+             "modes": n_modes,
++            "initial_modes": args.initial_modes,
++            "handoff_time": args.handoff_time,
+             "runs": args.runs,
+             "modal_model": args.modal_model,
+             "readout": args.readout,
+@@ -377,6 +418,7 @@
+             "n_modes": mode_count,
+             **diagnostic_values,
+             **_bank_diagnostics(raw_ensemble),
++            **_handoff_diagnostics(raw_ensemble),
+             **_readout_diagnostics(ensemble, config.n_particles),
+         }
+         mean = ensemble.mean
+@@ -457,6 +499,8 @@
+             n_modes=n_modes,
+             modal_particle_weight=args.modal_particle_weight,
+             initialization=args.initialization,
++            initial_n_modes=args.initial_modes,
++            handoff_time=args.handoff_time,
+             seed=args.seed + offset,
+         )
+         ensembles[model_name] = ensemble
+@@ -474,6 +518,7 @@
+         ).as_dict()
+         if name in ensembles:
+             values.update(_bank_diagnostics(ensembles[name]))
++            values.update(_handoff_diagnostics(ensembles[name]))
+         diagnostics[name] = values
+ 
+     figure = plot_model_comparison(
+@@ -564,6 +609,8 @@
+         n_modes=n_modes,
+         modal_particle_weight=args.modal_particle_weight,
+         initialization=args.initialization,
++        initial_n_modes=args.initial_modes,
++        handoff_time=args.handoff_time,
+         seed=args.seed + 1,
+     )
+ 
+@@ -659,6 +706,102 @@
+     return 0
+ 
+ 
++def run_handoff_sweep(args: argparse.Namespace) -> int:
++    """Sweep handoff times and final mode counts for adaptive correlated diffusion."""
++
++    config = _config_from_args(args)
++    initial_modes = config.n_nodes if args.initial_modes is None else args.initial_modes
++    final_modes = sorted(set(args.final_modes))
++    handoff_times = sorted(set(float(value) for value in args.handoff_times))
++    for mode_count in final_modes:
++        if not 1 <= mode_count <= initial_modes:
++            raise ValueError(
++                f"final mode count {mode_count} must lie in [1, {initial_modes}]"
++            )
++    for handoff_time in handoff_times:
++        if handoff_time < config.times[0] - 1e-12 or handoff_time > config.times[-1] + 1e-12:
++            raise ValueError(
++                f"handoff time {handoff_time:g} is outside the simulated range"
++            )
++
++    discrete_reference = discrete_expected_diffusion(config)
++    analytic_variance = multinomial_marginal_variance(config)
++    rows: list[dict[str, float | int | str]] = []
++
++    for handoff_time in handoff_times:
++        for final_mode_count in final_modes:
++            raw = run_modal_ensemble(
++                config,
++                n_runs=args.runs,
++                model="handoff_correlated_modal",
++                n_modes=final_mode_count,
++                initial_n_modes=initial_modes,
++                handoff_time=handoff_time,
++                seed=args.seed + int(round(1000 * handoff_time)) + final_mode_count,
++            )
++            ensemble = apply_readout_ensemble(
++                raw,
++                config,
++                readout=args.readout,
++                spatial_error_fraction=args.spatial_error_fraction,
++            )
++            diagnostics = summarize_ensemble(
++                discrete_reference,
++                analytic_variance,
++                ensemble.runs,
++                config.n_particles,
++            )
++            row: dict[str, float | int | str] = {
++                "modal_model": "handoff_correlated_modal",
++                "readout": args.readout,
++                "initial_n_modes": initial_modes,
++                "final_n_modes": final_mode_count,
++                "requested_handoff_time": handoff_time,
++                **diagnostics.as_dict(),
++                **_handoff_diagnostics(raw),
++                **_readout_diagnostics(ensemble, config.n_particles),
++            }
++            for start_time in args.error_start_times:
++                if start_time <= config.times[-1] + 1e-12:
++                    row[_time_column(float(start_time))] = relative_l2_error_from_time(
++                        discrete_reference,
++                        ensemble.mean,
++                        config.times,
++                        float(start_time),
++                    )
++            rows.append(row)
++            print(
++                f"handoff={handoff_time:6g} us  final_modes={final_mode_count:4d}  "
++                f"mean_l2={diagnostics.mean_relative_l2_error:.6g}  "
++                f"variance_l2={diagnostics.variance_relative_l2_error:.6g}  "
++                f"negative_mass={diagnostics.mean_negative_mass_fraction:.6g}"
++            )
++
++    csv_path = Path(args.csv_output)
++    csv_path.parent.mkdir(parents=True, exist_ok=True)
++    fieldnames: list[str] = []
++    for row in rows:
++        for key in row:
++            if key not in fieldnames:
++                fieldnames.append(key)
++    with csv_path.open("w", newline="", encoding="utf-8") as handle:
++        writer = csv.DictWriter(handle, fieldnames=fieldnames)
++        writer.writeheader()
++        writer.writerows(rows)
++
++    figure = plot_handoff_sweep(
++        rows=rows,
++        final_modes=final_modes,
++        handoff_times=handoff_times,
++        late_start_time=args.late_start_time,
++        output_path=args.output,
++        readout_label=args.readout,
++    )
++    print(f"Saved {csv_path}")
++    print(f"Saved {figure}")
++    return 0
++
++
+ def run_random_walk_benchmark(args: argparse.Namespace) -> int:
+     base_config = DiffusionConfig(
+         n_particles=args.particle_counts[0],
+@@ -713,6 +856,7 @@
+     )
+     _add_shared_arguments(validate)
+     _add_modal_model_argument(validate)
++    _add_handoff_arguments(validate)
+     _add_readout_argument(validate)
+     _add_covariance_arguments(validate)
+     validate.add_argument("--modes", type=int, default=None)
+@@ -733,6 +877,7 @@
+     )
+     _add_shared_arguments(sweep)
+     _add_modal_model_argument(sweep)
++    _add_handoff_arguments(sweep)
+     _add_readout_argument(sweep)
+     sweep.add_argument("--modes", type=int, nargs="+", default=None)
+     sweep.add_argument(
+@@ -751,12 +896,17 @@
+         help="Compare independent, correlated, and banked correlated modal formulations.",
+     )
+     _add_shared_arguments(compare)
++    _add_handoff_arguments(compare)
+     _add_covariance_arguments(compare)
+     compare.add_argument(
+         "--models",
+         nargs="+",
+         choices=MODAL_MODEL_NAMES,
+-        default=list(MODAL_MODEL_NAMES),
++        default=[
++            "independent_modal",
++            "correlated_modal",
++            "banked_correlated_modal",
++        ],
+     )
+     compare.add_argument("--modes", type=int, default=None)
+     compare.add_argument(
+@@ -776,6 +926,7 @@
+     )
+     _add_shared_arguments(compare_readouts)
+     _add_modal_model_argument(compare_readouts)
++    _add_handoff_arguments(compare_readouts)
+     _add_covariance_arguments(compare_readouts)
+     compare_readouts.add_argument(
+         "--readouts",
+@@ -806,6 +957,52 @@
+     compare_readouts.add_argument("--data-output", default=None)
+     compare_readouts.set_defaults(handler=run_readout_comparison)
+ 
++    handoff_sweep = subparsers.add_parser(
++        "sweep-handoff",
++        help="Sweep full-to-reduced handoff times and final correlated mode counts.",
++    )
++    _add_shared_arguments(handoff_sweep)
++    handoff_sweep.add_argument(
++        "--initial-modes",
++        type=int,
++        default=None,
++        help="Initial high-rank basis; defaults to all spatial modes.",
++    )
++    _add_readout_argument(handoff_sweep)
++    handoff_sweep.add_argument(
++        "--final-modes",
++        type=int,
++        nargs="+",
++        default=[10, 20, 30, 50],
++    )
++    handoff_sweep.add_argument(
++        "--handoff-times",
++        type=float,
++        nargs="+",
++        default=[1.0, 5.0, 10.0, 20.0],
++    )
++    handoff_sweep.add_argument(
++        "--error-start-times",
++        type=float,
++        nargs="+",
++        default=[0.0, 5.0, 10.0, 20.0],
++    )
++    handoff_sweep.add_argument(
++        "--late-start-time",
++        type=float,
++        default=20.0,
++        help="Evaluation window shown as the late-time mean-error panel.",
++    )
++    handoff_sweep.add_argument(
++        "--output",
++        default="outputs/adaptive_handoff/handoff_sweep.png",
++    )
++    handoff_sweep.add_argument(
++        "--csv-output",
++        default="outputs/adaptive_handoff/handoff_sweep.csv",
++    )
++    handoff_sweep.set_defaults(handler=run_handoff_sweep)
++
+     benchmark = subparsers.add_parser(
+         "benchmark-random-walk",
+         help="Benchmark naive particle trajectories against multinomial node transitions.",
+diff -ruN a/src/eigendiffusion/correlated_modal.py b/src/eigendiffusion/correlated_modal.py
+--- a/src/eigendiffusion/correlated_modal.py	2026-07-15 20:40:44.984039295 +0000
++++ b/src/eigendiffusion/correlated_modal.py	2026-07-15 20:40:45.032938219 +0000
+@@ -401,3 +401,197 @@
+             bank_balances=bank,
+             basis=self.basis,
+         )
++
++
++@dataclass(frozen=True, slots=True)
++class HandoffCorrelatedModalResult:
++    """Outputs of one full-to-reduced correlated modal simulation."""
++
++    spatial_counts: FloatArray
++    modal_amplitudes: FloatArray
++    noise_source_counts: FloatArray
++    basis: Eigenbasis
++    final_basis: Eigenbasis
++    handoff_step: int
++    handoff_time: float
++    initial_n_modes: int
++    final_n_modes: int
++    handoff_projection_relative_l2: float
++    modal_update_fraction_of_full: float
++    model_name: str = "handoff_correlated_modal"
++
++    @property
++    def minimum_count(self) -> float:
++        return float(np.min(self.spatial_counts))
++
++
++class HandoffCorrelatedModalDiffusion:
++    """Run a high-rank transient, then hand off to fewer correlated modes.
++
++    Diffusion begins in an ``initial_n_modes`` basis. At ``handoff_time``, the
++    current spatial state is projected onto the nested ``final_n_modes`` basis
++    and all subsequent updates use only those final modes. This targets the
++    central truncation problem of an impulse: high-frequency modes are retained
++    during the early transient, when they matter most, and discarded after
++    diffusion has smoothed the spatial profile.
++
++    The projection is intentionally visible in ``spatial_counts`` at the
++    handoff step. No residual bank or Delta-Sigma feedback is used to hide
++    omitted-mode error.
++    """
++
++    def __init__(
++        self,
++        config: DiffusionConfig,
++        *,
++        final_n_modes: int,
++        handoff_time: float,
++        initial_n_modes: int | None = None,
++    ) -> None:
++        self.config = config
++        initial = config.n_nodes if initial_n_modes is None else int(initial_n_modes)
++        final = int(final_n_modes)
++        if not 1 <= final <= initial <= config.n_nodes:
++            raise ValueError(
++                "mode counts must satisfy 1 <= final_n_modes <= "
++                "initial_n_modes <= n_nodes"
++            )
++        if not config.times[0] - 1e-12 <= handoff_time <= config.times[-1] + 1e-12:
++            raise ValueError("handoff_time must lie within the simulated time range")
++
++        operator = neumann_laplacian_1d(
++            config.n_nodes,
++            config.length,
++            config.diffusion_coefficient,
++        )
++        initial_basis = eigendecompose(operator, n_modes=initial)
++        # Slice the high-rank eigendecomposition so the two bases are exactly
++        # nested and use identical eigenvector signs.
++        final_basis = Eigenbasis(
++            eigenvalues=initial_basis.eigenvalues[:final].copy(),
++            eigenvectors=initial_basis.eigenvectors[:, :final].copy(),
++        )
++
++        initial_factors = 1.0 - config.dt * initial_basis.eigenvalues
++        final_factors = 1.0 - config.dt * final_basis.eigenvalues
++        if np.min(initial_factors) < -1e-12 or np.min(final_factors) < -1e-12:
++            raise ValueError(
++                "The timestep is too large for the fastest retained mode: "
++                "1 - lambda * dt must be nonnegative."
++            )
++
++        self.initial_basis = initial_basis
++        self.final_basis = final_basis
++        self.initial_n_modes = initial
++        self.final_n_modes = final
++        self._initial_factors = initial_factors
++        self._final_factors = final_factors
++        self.handoff_step = int(np.argmin(np.abs(config.times - float(handoff_time))))
++        self.handoff_time = float(config.times[self.handoff_step])
++
++    @property
++    def n_modes(self) -> int:
++        """Return the final reduced dimension used after handoff."""
++
++        return self.final_n_modes
++
++    def initial_spatial_counts(self) -> FloatArray:
++        return impulse_initial_condition(
++            self.config.n_nodes,
++            self.config.n_particles,
++            self.config.impulse_index,
++        )
++
++    def _noise_source_proxy(self, raw_spatial_counts: FloatArray) -> FloatArray:
++        return project_to_mass_simplex(raw_spatial_counts, self.config.n_particles)
++
++    def _modal_noise(
++        self,
++        source_counts: FloatArray,
++        basis: Eigenbasis,
++        rng: np.random.Generator,
++    ) -> FloatArray:
++        spatial_noise = sample_nearest_neighbour_gaussian_noise(
++            source_counts,
++            self.config.jump_probability,
++            rng,
++        )
++        modal_noise = basis.to_modal(spatial_noise)
++        modal_noise[0] = 0.0
++        return modal_noise
++
++    def run(
++        self,
++        rng: np.random.Generator | None = None,
++    ) -> HandoffCorrelatedModalResult:
++        generator = np.random.default_rng() if rng is None else rng
++        initial = self.initial_spatial_counts()
++        n_steps = self.config.n_steps
++
++        spatial = np.zeros((n_steps, self.config.n_nodes), dtype=float)
++        noise_sources = np.zeros_like(spatial)
++        # Store modal amplitudes in the initial/high-rank coordinate array.
++        # Entries above final_n_modes are exactly zero after the handoff.
++        modal_padded = np.zeros((n_steps, self.initial_n_modes), dtype=float)
++
++        high_modal = self.initial_basis.to_modal(initial)
++        modal_padded[0] = high_modal
++        spatial[0] = self.initial_basis.to_spatial(high_modal)
++        conserved_zero_mode = float(high_modal[0])
++
++        # High-rank transient: compute the state through the handoff time.
++        for time_index in range(self.handoff_step):
++            source = self._noise_source_proxy(spatial[time_index])
++            noise_sources[time_index] = source
++            next_modal = self._initial_factors * modal_padded[time_index]
++            next_modal += self._modal_noise(source, self.initial_basis, generator)
++            next_modal[0] = conserved_zero_mode
++            modal_padded[time_index + 1] = next_modal
++            spatial[time_index + 1] = self.initial_basis.to_spatial(next_modal)
++
++        # Project the state at the handoff time into the reduced nested basis.
++        pre_handoff = spatial[self.handoff_step].copy()
++        low_modal = self.final_basis.to_modal(pre_handoff)
++        low_modal[0] = conserved_zero_mode
++        low_spatial = self.final_basis.to_spatial(low_modal)
++        denominator = np.linalg.norm(pre_handoff)
++        if denominator == 0.0:
++            projection_error = 0.0
++        else:
++            projection_error = float(np.linalg.norm(pre_handoff - low_spatial) / denominator)
++        modal_padded[self.handoff_step] = 0.0
++        modal_padded[self.handoff_step, : self.final_n_modes] = low_modal
++        spatial[self.handoff_step] = low_spatial
++
++        # Reduced correlated dynamics after the handoff.
++        for time_index in range(self.handoff_step, n_steps - 1):
++            source = self._noise_source_proxy(spatial[time_index])
++            noise_sources[time_index] = source
++            current_low = modal_padded[time_index, : self.final_n_modes]
++            next_low = self._final_factors * current_low
++            next_low += self._modal_noise(source, self.final_basis, generator)
++            next_low[0] = conserved_zero_mode
++            modal_padded[time_index + 1, : self.final_n_modes] = next_low
++            spatial[time_index + 1] = self.final_basis.to_spatial(next_low)
++
++        noise_sources[-1] = self._noise_source_proxy(spatial[-1])
++        transition_count = max(n_steps - 1, 1)
++        modal_work = (
++            self.handoff_step * self.initial_n_modes
++            + (transition_count - self.handoff_step) * self.final_n_modes
++        )
++        full_work = transition_count * self.config.n_nodes
++
++        return HandoffCorrelatedModalResult(
++            spatial_counts=spatial,
++            modal_amplitudes=modal_padded,
++            noise_source_counts=noise_sources,
++            basis=self.initial_basis,
++            final_basis=self.final_basis,
++            handoff_step=self.handoff_step,
++            handoff_time=self.handoff_time,
++            initial_n_modes=self.initial_n_modes,
++            final_n_modes=self.final_n_modes,
++            handoff_projection_relative_l2=projection_error,
++            modal_update_fraction_of_full=float(modal_work / full_work),
++        )
+diff -ruN a/src/eigendiffusion/ensemble.py b/src/eigendiffusion/ensemble.py
+--- a/src/eigendiffusion/ensemble.py	2026-07-15 20:40:44.999175646 +0000
++++ b/src/eigendiffusion/ensemble.py	2026-07-15 20:40:45.033674146 +0000
+@@ -16,6 +16,7 @@
+ from .correlated_modal import (
+     BankedCorrelatedModalDiffusion,
+     CorrelatedModalDiffusion,
++    HandoffCorrelatedModalDiffusion,
+ )
+ from .eigenmarkov import IndependentModalDiffusion
+ from .readouts import ReadoutName, apply_readout
+@@ -26,11 +27,13 @@
+     "independent_modal",
+     "correlated_modal",
+     "banked_correlated_modal",
++    "handoff_correlated_modal",
+ ]
+ MODAL_MODEL_NAMES: tuple[ModalModelName, ...] = (
+     "independent_modal",
+     "correlated_modal",
+     "banked_correlated_modal",
++    "handoff_correlated_modal",
+ )
+ 
+ 
+@@ -133,6 +136,8 @@
+     n_modes: int | None = None,
+     modal_particle_weight: float = 1.0,
+     initialization: str = "nearest",
++    initial_n_modes: int | None = None,
++    handoff_time: float = 10.0,
+     seed: int = 0,
+ ) -> EnsembleResult:
+     """Run one named modal model repeatedly.
+@@ -156,6 +161,14 @@
+         simulator = CorrelatedModalDiffusion(config=config, n_modes=n_modes)
+     elif model == "banked_correlated_modal":
+         simulator = BankedCorrelatedModalDiffusion(config=config, n_modes=n_modes)
++    elif model == "handoff_correlated_modal":
++        final_n_modes = config.n_nodes if n_modes is None else int(n_modes)
++        simulator = HandoffCorrelatedModalDiffusion(
++            config=config,
++            final_n_modes=final_n_modes,
++            initial_n_modes=initial_n_modes,
++            handoff_time=handoff_time,
++        )
+     else:
+         allowed = ", ".join(MODAL_MODEL_NAMES)
+         raise ValueError(f"unknown modal model {model!r}; choose one of: {allowed}")
+@@ -163,6 +176,8 @@
+     child_sequences = np.random.SeedSequence(seed).spawn(n_runs)
+     spatial_runs: list[FloatArray] = []
+     bank_l1_fraction_runs: list[FloatArray] = []
++    handoff_projection_errors: list[float] = []
++    handoff_modal_work_fractions: list[float] = []
+ 
+     for sequence in child_sequences:
+         result = simulator.run(rng=np.random.default_rng(sequence))
+@@ -171,12 +186,24 @@
+             bank_l1_fraction_runs.append(
+                 np.abs(result.bank_balances).sum(axis=-1) / float(config.n_particles)
+             )
++        elif model == "handoff_correlated_modal":
++            handoff_projection_errors.append(result.handoff_projection_relative_l2)
++            handoff_modal_work_fractions.append(result.modal_update_fraction_of_full)
+ 
+     auxiliary: dict[str, FloatArray] | None = None
+     if bank_l1_fraction_runs:
+         auxiliary = {
+             "bank_l1_fraction": np.stack(bank_l1_fraction_runs).astype(float, copy=False)
+         }
++    if handoff_projection_errors:
++        if auxiliary is None:
++            auxiliary = {}
++        auxiliary["handoff_projection_relative_l2"] = np.asarray(
++            handoff_projection_errors, dtype=float
++        )
++        auxiliary["handoff_modal_update_fraction_of_full"] = np.asarray(
++            handoff_modal_work_fractions, dtype=float
++        )
+ 
+     return EnsembleResult(
+         runs=np.stack(spatial_runs).astype(float, copy=False),
+@@ -224,6 +251,29 @@
+     )
+ 
+ 
++
++def run_handoff_correlated_modal_ensemble(
++    config: DiffusionConfig,
++    n_runs: int,
++    *,
++    final_n_modes: int,
++    handoff_time: float,
++    initial_n_modes: int | None = None,
++    seed: int = 0,
++) -> EnsembleResult:
++    """Run the high-rank-to-reduced correlated modal model repeatedly."""
++
++    return run_modal_ensemble(
++        config,
++        n_runs=n_runs,
++        model="handoff_correlated_modal",
++        n_modes=final_n_modes,
++        initial_n_modes=initial_n_modes,
++        handoff_time=handoff_time,
++        seed=seed,
++    )
++
++
+ def run_eigenmarkov_ensemble(
+     config: DiffusionConfig,
+     n_runs: int,
+diff -ruN a/src/eigendiffusion/plotting.py b/src/eigendiffusion/plotting.py
+--- a/src/eigendiffusion/plotting.py	2026-07-15 20:40:45.015662513 +0000
++++ b/src/eigendiffusion/plotting.py	2026-07-15 20:40:45.034207632 +0000
+@@ -18,6 +18,7 @@
+         "independent_modal": "independent modal",
+         "correlated_modal": "correlated modal",
+         "banked_correlated_modal": "banked correlated modal",
++        "handoff_correlated_modal": "handoff correlated modal",
+         "random_walk_multinomial": "multinomial random walk",
+         "random_walk_naive": "naive random walk",
+         "raw": "raw readout",
+@@ -305,6 +306,65 @@
+     fig.tight_layout()
+     fig.savefig(output, dpi=200, bbox_inches="tight")
+     plt.close(fig)
++    return output
++
++
++
++def plot_handoff_sweep(
++    rows: list[dict[str, float | int | str | None]],
++    final_modes: list[int],
++    handoff_times: list[float],
++    late_start_time: float,
++    output_path: str | Path,
++    readout_label: str = "raw",
++) -> Path:
++    """Plot full-to-reduced handoff accuracy over times and final dimensions."""
++
++    output = Path(output_path)
++    output.parent.mkdir(parents=True, exist_ok=True)
++    late_key = (
++        f"mean_relative_l2_t_ge_{late_start_time:g}us"
++        .replace("-", "m")
++        .replace(".", "p")
++    )
++
++    by_pair = {
++        (float(row["requested_handoff_time"]), int(row["final_n_modes"])): row
++        for row in rows
++    }
++    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0))
++
++    panels = (
++        ("mean_relative_l2_error", "All-time mean error", "relative L2 mean error"),
++        (late_key, f"Mean error for t ≥ {late_start_time:g} µs", "relative L2 mean error"),
++        ("variance_relative_l2_error", "Variance error", "relative L2 variance error"),
++        (
++            "mean_handoff_projection_relative_l2",
++            "One-time handoff projection error",
++            "relative L2 projection error",
++        ),
++    )
++
++    for ax, (metric, title, ylabel) in zip(axes.ravel(), panels, strict=True):
++        for handoff_time in handoff_times:
++            values = []
++            for mode_count in final_modes:
++                row = by_pair[(float(handoff_time), int(mode_count))]
++                value = row.get(metric)
++                values.append(np.nan if value is None else float(value))
++            ax.plot(final_modes, values, marker="o", label=f"handoff {handoff_time:g} µs")
++        ax.set_xlabel("final retained eigenmodes")
++        ax.set_ylabel(ylabel)
++        ax.set_title(title)
++        ax.legend(fontsize=8)
++
++    fig.suptitle(
++        f"Full-to-reduced correlated modal handoff + {_display_name(readout_label)}",
++        y=1.01,
++    )
++    fig.tight_layout()
++    fig.savefig(output, dpi=200, bbox_inches="tight")
++    plt.close(fig)
+     return output
+ 
+ 
+diff -ruN a/tests/test_cli_handoff.py b/tests/test_cli_handoff.py
+--- a/tests/test_cli_handoff.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_cli_handoff.py	2026-07-15 20:40:45.051950410 +0000
+@@ -0,0 +1,42 @@
++from eigendiffusion.cli import build_parser
++
++
++def test_validate_accepts_handoff_model_arguments() -> None:
++    parser = build_parser()
++    args = parser.parse_args(
++        [
++            "validate",
++            "--modal-model",
++            "handoff_correlated_modal",
++            "--initial-modes",
++            "21",
++            "--modes",
++            "8",
++            "--handoff-time",
++            "5",
++        ]
++    )
++    assert args.modal_model == "handoff_correlated_modal"
++    assert args.initial_modes == 21
++    assert args.modes == 8
++    assert args.handoff_time == 5.0
++
++
++def test_sweep_handoff_parser() -> None:
++    parser = build_parser()
++    args = parser.parse_args(
++        [
++            "sweep-handoff",
++            "--initial-modes",
++            "21",
++            "--final-modes",
++            "5",
++            "8",
++            "--handoff-times",
++            "1",
++            "5",
++        ]
++    )
++    assert args.initial_modes == 21
++    assert args.final_modes == [5, 8]
++    assert args.handoff_times == [1.0, 5.0]
+diff -ruN a/tests/test_handoff_correlated_modal.py b/tests/test_handoff_correlated_modal.py
+--- a/tests/test_handoff_correlated_modal.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_handoff_correlated_modal.py	2026-07-15 20:40:45.052589200 +0000
+@@ -0,0 +1,88 @@
++import numpy as np
++
++from eigendiffusion import (
++    CorrelatedModalDiffusion,
++    DiffusionConfig,
++    HandoffCorrelatedModalDiffusion,
++    run_handoff_correlated_modal_ensemble,
++)
++
++
++def small_config() -> DiffusionConfig:
++    return DiffusionConfig(
++        n_particles=500,
++        n_nodes=21,
++        n_steps=21,
++        impulse_index=10,
++        dt=1.0,
++        length=4.0,
++        diffusion_coefficient=2.20e-4,
++    )
++
++
++def test_handoff_with_equal_mode_counts_matches_correlated_model() -> None:
++    config = small_config()
++    seed = 123
++    standard = CorrelatedModalDiffusion(config, n_modes=config.n_nodes).run(
++        rng=np.random.default_rng(seed)
++    )
++    handoff = HandoffCorrelatedModalDiffusion(
++        config,
++        initial_n_modes=config.n_nodes,
++        final_n_modes=config.n_nodes,
++        handoff_time=5.0,
++    ).run(rng=np.random.default_rng(seed))
++
++    np.testing.assert_allclose(handoff.spatial_counts, standard.spatial_counts, atol=1e-12)
++    assert handoff.handoff_projection_relative_l2 < 1e-12
++
++
++def test_handoff_at_zero_matches_fixed_reduced_correlated_model() -> None:
++    config = small_config()
++    seed = 456
++    reduced = CorrelatedModalDiffusion(config, n_modes=8).run(
++        rng=np.random.default_rng(seed)
++    )
++    handoff = HandoffCorrelatedModalDiffusion(
++        config,
++        initial_n_modes=config.n_nodes,
++        final_n_modes=8,
++        handoff_time=0.0,
++    ).run(rng=np.random.default_rng(seed))
++
++    np.testing.assert_allclose(handoff.spatial_counts, reduced.spatial_counts, atol=1e-12)
++
++
++def test_handoff_conserves_mass() -> None:
++    config = small_config()
++    result = HandoffCorrelatedModalDiffusion(
++        config,
++        initial_n_modes=config.n_nodes,
++        final_n_modes=8,
++        handoff_time=5.0,
++    ).run(rng=np.random.default_rng(7))
++
++    np.testing.assert_allclose(
++        result.spatial_counts.sum(axis=1),
++        config.n_particles,
++        atol=1e-9,
++    )
++    assert np.allclose(result.modal_amplitudes[6:, 8:], 0.0)
++
++
++def test_handoff_ensemble_reports_projection_error() -> None:
++    config = small_config()
++    ensemble = run_handoff_correlated_modal_ensemble(
++        config,
++        n_runs=3,
++        initial_n_modes=config.n_nodes,
++        final_n_modes=8,
++        handoff_time=5.0,
++        seed=0,
++    )
++
++    assert ensemble.runs.shape == (3, config.n_steps, config.n_nodes)
++    assert ensemble.auxiliary is not None
++    errors = ensemble.auxiliary["handoff_projection_relative_l2"]
++    assert errors.shape == (3,)
++    assert np.all(errors >= 0.0)

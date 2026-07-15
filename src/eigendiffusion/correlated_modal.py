@@ -401,3 +401,197 @@ class BankedCorrelatedModalDiffusion(_CorrelatedModalBase):
             bank_balances=bank,
             basis=self.basis,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffCorrelatedModalResult:
+    """Outputs of one full-to-reduced correlated modal simulation."""
+
+    spatial_counts: FloatArray
+    modal_amplitudes: FloatArray
+    noise_source_counts: FloatArray
+    basis: Eigenbasis
+    final_basis: Eigenbasis
+    handoff_step: int
+    handoff_time: float
+    initial_n_modes: int
+    final_n_modes: int
+    handoff_projection_relative_l2: float
+    modal_update_fraction_of_full: float
+    model_name: str = "handoff_correlated_modal"
+
+    @property
+    def minimum_count(self) -> float:
+        return float(np.min(self.spatial_counts))
+
+
+class HandoffCorrelatedModalDiffusion:
+    """Run a high-rank transient, then hand off to fewer correlated modes.
+
+    Diffusion begins in an ``initial_n_modes`` basis. At ``handoff_time``, the
+    current spatial state is projected onto the nested ``final_n_modes`` basis
+    and all subsequent updates use only those final modes. This targets the
+    central truncation problem of an impulse: high-frequency modes are retained
+    during the early transient, when they matter most, and discarded after
+    diffusion has smoothed the spatial profile.
+
+    The projection is intentionally visible in ``spatial_counts`` at the
+    handoff step. No residual bank or Delta-Sigma feedback is used to hide
+    omitted-mode error.
+    """
+
+    def __init__(
+        self,
+        config: DiffusionConfig,
+        *,
+        final_n_modes: int,
+        handoff_time: float,
+        initial_n_modes: int | None = None,
+    ) -> None:
+        self.config = config
+        initial = config.n_nodes if initial_n_modes is None else int(initial_n_modes)
+        final = int(final_n_modes)
+        if not 1 <= final <= initial <= config.n_nodes:
+            raise ValueError(
+                "mode counts must satisfy 1 <= final_n_modes <= "
+                "initial_n_modes <= n_nodes"
+            )
+        if not config.times[0] - 1e-12 <= handoff_time <= config.times[-1] + 1e-12:
+            raise ValueError("handoff_time must lie within the simulated time range")
+
+        operator = neumann_laplacian_1d(
+            config.n_nodes,
+            config.length,
+            config.diffusion_coefficient,
+        )
+        initial_basis = eigendecompose(operator, n_modes=initial)
+        # Slice the high-rank eigendecomposition so the two bases are exactly
+        # nested and use identical eigenvector signs.
+        final_basis = Eigenbasis(
+            eigenvalues=initial_basis.eigenvalues[:final].copy(),
+            eigenvectors=initial_basis.eigenvectors[:, :final].copy(),
+        )
+
+        initial_factors = 1.0 - config.dt * initial_basis.eigenvalues
+        final_factors = 1.0 - config.dt * final_basis.eigenvalues
+        if np.min(initial_factors) < -1e-12 or np.min(final_factors) < -1e-12:
+            raise ValueError(
+                "The timestep is too large for the fastest retained mode: "
+                "1 - lambda * dt must be nonnegative."
+            )
+
+        self.initial_basis = initial_basis
+        self.final_basis = final_basis
+        self.initial_n_modes = initial
+        self.final_n_modes = final
+        self._initial_factors = initial_factors
+        self._final_factors = final_factors
+        self.handoff_step = int(np.argmin(np.abs(config.times - float(handoff_time))))
+        self.handoff_time = float(config.times[self.handoff_step])
+
+    @property
+    def n_modes(self) -> int:
+        """Return the final reduced dimension used after handoff."""
+
+        return self.final_n_modes
+
+    def initial_spatial_counts(self) -> FloatArray:
+        return impulse_initial_condition(
+            self.config.n_nodes,
+            self.config.n_particles,
+            self.config.impulse_index,
+        )
+
+    def _noise_source_proxy(self, raw_spatial_counts: FloatArray) -> FloatArray:
+        return project_to_mass_simplex(raw_spatial_counts, self.config.n_particles)
+
+    def _modal_noise(
+        self,
+        source_counts: FloatArray,
+        basis: Eigenbasis,
+        rng: np.random.Generator,
+    ) -> FloatArray:
+        spatial_noise = sample_nearest_neighbour_gaussian_noise(
+            source_counts,
+            self.config.jump_probability,
+            rng,
+        )
+        modal_noise = basis.to_modal(spatial_noise)
+        modal_noise[0] = 0.0
+        return modal_noise
+
+    def run(
+        self,
+        rng: np.random.Generator | None = None,
+    ) -> HandoffCorrelatedModalResult:
+        generator = np.random.default_rng() if rng is None else rng
+        initial = self.initial_spatial_counts()
+        n_steps = self.config.n_steps
+
+        spatial = np.zeros((n_steps, self.config.n_nodes), dtype=float)
+        noise_sources = np.zeros_like(spatial)
+        # Store modal amplitudes in the initial/high-rank coordinate array.
+        # Entries above final_n_modes are exactly zero after the handoff.
+        modal_padded = np.zeros((n_steps, self.initial_n_modes), dtype=float)
+
+        high_modal = self.initial_basis.to_modal(initial)
+        modal_padded[0] = high_modal
+        spatial[0] = self.initial_basis.to_spatial(high_modal)
+        conserved_zero_mode = float(high_modal[0])
+
+        # High-rank transient: compute the state through the handoff time.
+        for time_index in range(self.handoff_step):
+            source = self._noise_source_proxy(spatial[time_index])
+            noise_sources[time_index] = source
+            next_modal = self._initial_factors * modal_padded[time_index]
+            next_modal += self._modal_noise(source, self.initial_basis, generator)
+            next_modal[0] = conserved_zero_mode
+            modal_padded[time_index + 1] = next_modal
+            spatial[time_index + 1] = self.initial_basis.to_spatial(next_modal)
+
+        # Project the state at the handoff time into the reduced nested basis.
+        pre_handoff = spatial[self.handoff_step].copy()
+        low_modal = self.final_basis.to_modal(pre_handoff)
+        low_modal[0] = conserved_zero_mode
+        low_spatial = self.final_basis.to_spatial(low_modal)
+        denominator = np.linalg.norm(pre_handoff)
+        if denominator == 0.0:
+            projection_error = 0.0
+        else:
+            projection_error = float(np.linalg.norm(pre_handoff - low_spatial) / denominator)
+        modal_padded[self.handoff_step] = 0.0
+        modal_padded[self.handoff_step, : self.final_n_modes] = low_modal
+        spatial[self.handoff_step] = low_spatial
+
+        # Reduced correlated dynamics after the handoff.
+        for time_index in range(self.handoff_step, n_steps - 1):
+            source = self._noise_source_proxy(spatial[time_index])
+            noise_sources[time_index] = source
+            current_low = modal_padded[time_index, : self.final_n_modes]
+            next_low = self._final_factors * current_low
+            next_low += self._modal_noise(source, self.final_basis, generator)
+            next_low[0] = conserved_zero_mode
+            modal_padded[time_index + 1, : self.final_n_modes] = next_low
+            spatial[time_index + 1] = self.final_basis.to_spatial(next_low)
+
+        noise_sources[-1] = self._noise_source_proxy(spatial[-1])
+        transition_count = max(n_steps - 1, 1)
+        modal_work = (
+            self.handoff_step * self.initial_n_modes
+            + (transition_count - self.handoff_step) * self.final_n_modes
+        )
+        full_work = transition_count * self.config.n_nodes
+
+        return HandoffCorrelatedModalResult(
+            spatial_counts=spatial,
+            modal_amplitudes=modal_padded,
+            noise_source_counts=noise_sources,
+            basis=self.initial_basis,
+            final_basis=self.final_basis,
+            handoff_step=self.handoff_step,
+            handoff_time=self.handoff_time,
+            initial_n_modes=self.initial_n_modes,
+            final_n_modes=self.final_n_modes,
+            handoff_projection_relative_l2=projection_error,
+            modal_update_fraction_of_full=float(modal_work / full_work),
+        )
