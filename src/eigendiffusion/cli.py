@@ -20,6 +20,7 @@ from .ensemble import (
     run_random_walk_ensemble,
 )
 from .metrics import (
+    relative_frobenius_error,
     relative_l2_error,
     relative_l2_error_from_time,
     summarize_ensemble,
@@ -30,6 +31,7 @@ from .plotting import (
     plot_mode_sweep,
     plot_model_comparison,
     plot_random_walk_benchmark,
+    plot_temporal_correlation_comparison,
     plot_validation,
 )
 from .readouts import READOUT_NAMES, ReadoutName, readout_constraint_diagnostics
@@ -38,6 +40,13 @@ from .references import (
     discrete_expected_diffusion,
     multinomial_marginal_covariance,
     multinomial_marginal_variance,
+)
+from .temporal import (
+    empirical_mean_cross_time_covariance,
+    mean_node_lag_correlation_from_runs,
+    multinomial_mean_cross_time_covariance,
+    multinomial_mean_node_lag_correlation,
+    valid_time_origins,
 )
 
 
@@ -98,25 +107,7 @@ def _add_handoff_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_readout_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--readout",
-        choices=READOUT_NAMES,
-        default="raw",
-        help=(
-            "Output-only physical readout. Delta-Sigma readouts do not feed "
-            "back into the modal dynamics."
-        ),
-    )
-    parser.add_argument(
-        "--spatial-error-fraction",
-        type=float,
-        default=0.5,
-        help=(
-            "Fraction of Delta-Sigma quantization error borrowed by the next "
-            "spatial node; used only by delta_sigma_neighbor."
-        ),
-    )
+def _add_completion_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--completion-start-time",
         type=float,
@@ -141,6 +132,28 @@ def _add_readout_argument(parser: argparse.ArgumentParser) -> None:
         default=1.0e-2,
         help="Ridge fraction used to stabilize Gaussian conditional completion.",
     )
+
+
+def _add_readout_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--readout",
+        choices=READOUT_NAMES,
+        default="raw",
+        help=(
+            "Output-only physical readout. Delta-Sigma readouts do not feed "
+            "back into the modal dynamics."
+        ),
+    )
+    parser.add_argument(
+        "--spatial-error-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of Delta-Sigma quantization error borrowed by the next "
+            "spatial node; used only by delta_sigma_neighbor."
+        ),
+    )
+    _add_completion_arguments(parser)
 
 
 def _add_covariance_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1008,6 +1021,280 @@ def run_completion_rank_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _nearest_step(times: np.ndarray, requested_time: float) -> int:
+    if requested_time < times[0] - 1e-12 or requested_time > times[-1] + 1e-12:
+        raise ValueError(
+            f"requested time {requested_time:g} is outside "
+            f"[{times[0]:g}, {times[-1]:g}]"
+        )
+    return int(np.argmin(np.abs(times - float(requested_time))))
+
+
+def run_temporal_correlation_comparison(args: argparse.Namespace) -> int:
+    """Compare exact and empirical cross-time covariance after modal handoff."""
+
+    config = _config_from_args(args)
+    final_modes = int(args.modes)
+    initial_modes = config.n_nodes if args.initial_modes is None else int(args.initial_modes)
+    if not 1 <= final_modes <= initial_modes <= config.n_nodes:
+        raise ValueError("require 1 <= modes <= initial_modes <= nodes")
+
+    lag_steps = sorted(
+        {
+            max(1, int(np.rint(float(lag_time) / config.dt)))
+            for lag_time in args.lags
+        }
+    )
+    if not lag_steps or max(lag_steps) >= config.n_steps:
+        raise ValueError("lags must contain positive values shorter than the trajectory")
+    lag_times = [float(step * config.dt) for step in lag_steps]
+
+    start_step = _nearest_step(config.times, args.temporal_start_time)
+    end_step = (
+        config.n_steps - 1
+        if args.temporal_end_time is None
+        else _nearest_step(config.times, args.temporal_end_time)
+    )
+    if end_step <= start_step:
+        raise ValueError("temporal_end_time must be later than temporal_start_time")
+
+    radius = int(args.node_window_radius)
+    if radius < 0:
+        raise ValueError("node_window_radius must be nonnegative")
+    window_nodes = np.arange(
+        max(0, config.impulse_index - radius),
+        min(config.n_nodes, config.impulse_index + radius + 1),
+        dtype=np.int64,
+    )
+    impulse_nodes = np.asarray([config.impulse_index], dtype=np.int64)
+
+    random_walk = run_random_walk_ensemble(
+        config,
+        n_runs=args.runs,
+        seed=args.seed,
+        method=args.random_walk_method,
+    )
+    full_correlated = run_modal_ensemble(
+        config,
+        n_runs=args.runs,
+        model="correlated_modal",
+        n_modes=config.n_nodes,
+        seed=args.seed + 1,
+    )
+    handoff_raw = run_modal_ensemble(
+        config,
+        n_runs=args.runs,
+        model="handoff_correlated_modal",
+        n_modes=final_modes,
+        initial_n_modes=initial_modes,
+        handoff_time=args.handoff_time,
+        seed=args.seed + 2,
+    )
+    completion_start = (
+        args.handoff_time
+        if args.completion_start_time is None
+        else float(args.completion_start_time)
+    )
+    handoff_completed = apply_readout_ensemble(
+        handoff_raw,
+        config,
+        readout="unresolved_gaussian_completion",
+        retained_modes=final_modes,
+        completion_start_time=completion_start,
+        completion_rank=args.completion_rank,
+        completion_ridge=args.completion_ridge,
+        seed=args.seed + 10_000,
+    )
+
+    model_runs: dict[str, np.ndarray] = {
+        f"random_walk_{args.random_walk_method}": random_walk.runs,
+        "full_correlated_modal": full_correlated.runs,
+        "handoff_raw": handoff_raw.runs,
+        "handoff_completion": handoff_completed.runs,
+    }
+
+    covariance_errors: dict[str, list[float]] = {name: [] for name in model_runs}
+    impulse_correlations: dict[str, list[float]] = {
+        "analytic_reference": []
+    }
+    window_correlations: dict[str, list[float]] = {
+        "analytic_reference": []
+    }
+    for name in model_runs:
+        impulse_correlations[name] = []
+        window_correlations[name] = []
+
+    rows: list[dict[str, float | int | str]] = []
+    profile_step = max(1, int(np.rint(float(args.profile_lag) / config.dt)))
+    profile_origins = valid_time_origins(
+        config.n_steps,
+        profile_step,
+        start_step=start_step,
+        end_step=end_step,
+    )
+    if profile_origins.size == 0:
+        raise ValueError("profile_lag has no valid time origins in the requested window")
+    analytic_profile_covariance = multinomial_mean_cross_time_covariance(
+        config,
+        profile_step,
+        start_indices=profile_origins,
+    )
+    profile_covariances: dict[str, np.ndarray] = {
+        "analytic_reference": np.diag(analytic_profile_covariance)
+    }
+
+    for lag_step, lag_time in zip(lag_steps, lag_times, strict=True):
+        origins = valid_time_origins(
+            config.n_steps,
+            lag_step,
+            start_step=start_step,
+            end_step=end_step,
+        )
+        if origins.size == 0:
+            raise ValueError(
+                f"lag {lag_time:g} µs has no valid time origins in the requested window"
+            )
+        analytic_covariance = multinomial_mean_cross_time_covariance(
+            config,
+            lag_step,
+            start_indices=origins,
+        )
+        analytic_impulse = multinomial_mean_node_lag_correlation(
+            config,
+            lag_step,
+            impulse_nodes,
+            start_indices=origins,
+        )
+        analytic_window = multinomial_mean_node_lag_correlation(
+            config,
+            lag_step,
+            window_nodes,
+            start_indices=origins,
+        )
+        impulse_correlations["analytic_reference"].append(analytic_impulse)
+        window_correlations["analytic_reference"].append(analytic_window)
+        rows.append(
+            {
+                "model": "analytic_reference",
+                "lag_steps": lag_step,
+                "lag_time_us": lag_time,
+                "n_time_origins": int(origins.size),
+                "cross_time_covariance_relative_frobenius_error": 0.0,
+                "impulse_node_lag_correlation": analytic_impulse,
+                "central_window_lag_correlation": analytic_window,
+            }
+        )
+
+        for name, runs in model_runs.items():
+            observed_covariance = empirical_mean_cross_time_covariance(
+                runs,
+                lag_step,
+                start_indices=origins,
+            )
+            covariance_error = relative_frobenius_error(
+                analytic_covariance,
+                observed_covariance,
+            )
+            impulse_correlation = mean_node_lag_correlation_from_runs(
+                runs,
+                lag_step,
+                impulse_nodes,
+                start_indices=origins,
+            )
+            window_correlation = mean_node_lag_correlation_from_runs(
+                runs,
+                lag_step,
+                window_nodes,
+                start_indices=origins,
+            )
+            covariance_errors[name].append(covariance_error)
+            impulse_correlations[name].append(impulse_correlation)
+            window_correlations[name].append(window_correlation)
+            rows.append(
+                {
+                    "model": name,
+                    "lag_steps": lag_step,
+                    "lag_time_us": lag_time,
+                    "n_time_origins": int(origins.size),
+                    "cross_time_covariance_relative_frobenius_error": covariance_error,
+                    "impulse_node_lag_correlation": impulse_correlation,
+                    "central_window_lag_correlation": window_correlation,
+                }
+            )
+
+    for name, runs in model_runs.items():
+        covariance = empirical_mean_cross_time_covariance(
+            runs,
+            profile_step,
+            start_indices=profile_origins,
+        )
+        profile_covariances[name] = np.diag(covariance)
+
+    figure = plot_temporal_correlation_comparison(
+        lag_times=lag_times,
+        covariance_errors=covariance_errors,
+        impulse_correlations=impulse_correlations,
+        window_correlations=window_correlations,
+        profile_positions=config.positions,
+        profile_covariances=profile_covariances,
+        profile_lag_time=float(profile_step * config.dt),
+        output_path=args.output,
+    )
+
+    csv_path = Path(args.csv_output)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    data_path = Path(args.data_output) if args.data_output else figure.with_suffix(".npz")
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    save_items: dict[str, object] = {
+        "lag_steps": np.asarray(lag_steps, dtype=int),
+        "lag_times": np.asarray(lag_times, dtype=float),
+        "positions": config.positions,
+        "profile_lag_steps": np.asarray(profile_step),
+        "profile_lag_time": np.asarray(profile_step * config.dt),
+        "window_nodes": window_nodes,
+        "temporal_start_time": np.asarray(config.times[start_step]),
+        "temporal_end_time": np.asarray(config.times[end_step]),
+    }
+    for name, values in covariance_errors.items():
+        save_items[f"covariance_error_{name}"] = np.asarray(values, dtype=float)
+    for name, values in impulse_correlations.items():
+        save_items[f"impulse_correlation_{name}"] = np.asarray(values, dtype=float)
+    for name, values in window_correlations.items():
+        save_items[f"window_correlation_{name}"] = np.asarray(values, dtype=float)
+    for name, values in profile_covariances.items():
+        save_items[f"profile_covariance_{name}"] = np.asarray(values, dtype=float)
+    np.savez_compressed(data_path, **save_items)
+
+    report = {
+        "configuration": {
+            "particles": config.n_particles,
+            "nodes": config.n_nodes,
+            "steps": config.n_steps,
+            "runs": args.runs,
+            "initial_modes": initial_modes,
+            "final_modes": final_modes,
+            "handoff_time": args.handoff_time,
+            "completion_start_time": completion_start,
+            "completion_rank": args.completion_rank,
+            "completion_ridge": args.completion_ridge,
+            "lags_us": lag_times,
+            "temporal_start_time": float(config.times[start_step]),
+            "temporal_end_time": float(config.times[end_step]),
+            "node_window_radius": radius,
+        },
+        "figure": str(figure),
+        "csv": str(csv_path),
+        "data": str(data_path),
+    }
+    print(json.dumps(report, indent=2))
+    return 0
+
 def run_random_walk_benchmark(args: argparse.Namespace) -> int:
     base_config = DiffusionConfig(
         n_particles=args.particle_counts[0],
@@ -1134,6 +1421,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_modal_model_argument(compare_readouts)
     _add_handoff_arguments(compare_readouts)
     _add_covariance_arguments(compare_readouts)
+    _add_completion_arguments(compare_readouts)
     compare_readouts.add_argument(
         "--readouts",
         nargs="+",
@@ -1149,30 +1437,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--spatial-error-fraction",
         type=float,
         default=0.5,
-    )
-    compare_readouts.add_argument(
-        "--completion-start-time",
-        type=float,
-        default=None,
-        help=(
-            "Start time for unresolved_gaussian_completion. Defaults to the "
-            "handoff time for handoff_correlated_modal and 0 otherwise."
-        ),
-    )
-    compare_readouts.add_argument(
-        "--completion-rank",
-        type=int,
-        default=None,
-        help=(
-            "Number of unresolved covariance directions to sample. "
-            "Defaults to all omitted modes."
-        ),
-    )
-    compare_readouts.add_argument(
-        "--completion-ridge",
-        type=float,
-        default=1.0e-2,
-        help="Ridge fraction for Gaussian conditional completion.",
     )
     compare_readouts.add_argument("--modes", type=int, default=None)
     compare_readouts.add_argument(
@@ -1265,6 +1529,64 @@ def build_parser() -> argparse.ArgumentParser:
         default="outputs/unresolved_completion/completion_rank_sweep.csv",
     )
     completion_sweep.set_defaults(handler=run_completion_rank_sweep)
+
+    temporal = subparsers.add_parser(
+        "compare-temporal-correlation",
+        help=(
+            "Compare exact and empirical cross-time covariance for random walk, "
+            "full correlated, raw handoff, and completed handoff models."
+        ),
+    )
+    _add_shared_arguments(temporal)
+    _add_handoff_arguments(temporal)
+    _add_completion_arguments(temporal)
+    temporal.add_argument("--modes", type=int, default=50)
+    temporal.add_argument(
+        "--lags",
+        type=float,
+        nargs="+",
+        default=[1.0, 2.0, 5.0, 10.0, 20.0],
+        help="Time lags in microseconds.",
+    )
+    temporal.add_argument(
+        "--temporal-start-time",
+        type=float,
+        default=10.0,
+        help="Earliest time origin included in the temporal statistics.",
+    )
+    temporal.add_argument(
+        "--temporal-end-time",
+        type=float,
+        default=None,
+        help="Latest destination time; defaults to the final saved time.",
+    )
+    temporal.add_argument(
+        "--node-window-radius",
+        type=int,
+        default=10,
+        help="Radius around the impulse node used for the central-window correlation.",
+    )
+    temporal.add_argument(
+        "--profile-lag",
+        type=float,
+        default=5.0,
+        help="Lag used for the spatial persistence profile panel.",
+    )
+    temporal.add_argument(
+        "--random-walk-method",
+        choices=("naive", "multinomial"),
+        default="multinomial",
+    )
+    temporal.add_argument(
+        "--output",
+        default="outputs/temporal_correlation/temporal_correlation_comparison.png",
+    )
+    temporal.add_argument(
+        "--csv-output",
+        default="outputs/temporal_correlation/temporal_correlation_comparison.csv",
+    )
+    temporal.add_argument("--data-output", default=None)
+    temporal.set_defaults(handler=run_temporal_correlation_comparison)
 
     benchmark = subparsers.add_parser(
         "benchmark-random-walk",

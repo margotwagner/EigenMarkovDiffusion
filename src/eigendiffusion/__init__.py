@@ -74,6 +74,13 @@ from .references import (
     multinomial_node_probabilities,
     random_walk_transition_matrix,
 )
+from .temporal import (
+    empirical_mean_cross_time_covariance,
+    mean_node_lag_correlation_from_runs,
+    multinomial_mean_cross_time_covariance,
+    multinomial_mean_node_lag_correlation,
+    valid_time_origins,
+)
 
 __all__ = [
     "BankedCorrelatedModalDiffusion",
@@ -111,9 +118,12 @@ __all__ = [
     "deterministic_diffusion",
     "discrete_expected_diffusion",
     "empirical_covariance",
+    "empirical_mean_cross_time_covariance",
     "estimate_random_walk_core_bytes",
     "multinomial_marginal_covariance",
     "multinomial_marginal_variance",
+    "multinomial_mean_cross_time_covariance",
+    "multinomial_mean_node_lag_correlation",
     "multinomial_node_probabilities",
     "multinomial_random_walk_diffusion",
     "nearest_neighbour_transition_covariance",
@@ -123,6 +133,7 @@ __all__ = [
     "random_walk_diffusion",
     "random_walk_transition_matrix",
     "relative_l2_error_from_time",
+    "mean_node_lag_correlation_from_runs",
     "run_banked_correlated_modal_ensemble",
     "run_correlated_modal_ensemble",
     "run_eigenmarkov_ensemble",
@@ -135,6 +146,7 @@ __all__ = [
     "summarize",
     "summarize_ensemble",
     "trajectories_to_counts",
+    "valid_time_origins",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

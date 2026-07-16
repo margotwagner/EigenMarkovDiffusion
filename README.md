@@ -480,3 +480,40 @@ python -m eigendiffusion sweep-completion-rank \
 
 Rank `0` is the unchanged raw handoff baseline. See
 [`docs/UNRESOLVED_GAUSSIAN_COMPLETION.md`](docs/UNRESOLVED_GAUSSIAN_COMPLETION.md).
+
+## Cross-time covariance and temporal correlation
+
+Version 0.8 adds a diagnostic command for testing whether stochastic
+fluctuations persist correctly across time. This is the next validation step
+for rank-10 unresolved Gaussian completion, which already matches same-time
+mean, variance, and covariance but resamples its unresolved contribution at
+each output time.
+
+```bash
+mkdir -p outputs/temporal_correlation/t10_m50_completion_r10_r500
+
+python -m eigendiffusion compare-temporal-correlation \
+  --initial-modes 101 \
+  --modes 50 \
+  --handoff-time 10 \
+  --completion-start-time 10 \
+  --completion-rank 10 \
+  --completion-ridge 0.01 \
+  --lags 1 2 5 10 20 \
+  --temporal-start-time 10 \
+  --node-window-radius 10 \
+  --profile-lag 5 \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 500 \
+  --random-walk-method multinomial \
+  --seed 0 \
+  --output outputs/temporal_correlation/t10_m50_completion_r10_r500/comparison.png \
+  --csv-output outputs/temporal_correlation/t10_m50_completion_r10_r500/comparison.csv \
+  --data-output outputs/temporal_correlation/t10_m50_completion_r10_r500/comparison.npz
+```
+
+See [`docs/TEMPORAL_CORRELATION_DIAGNOSTICS.md`](docs/TEMPORAL_CORRELATION_DIAGNOSTICS.md)
+for the exact cross-time covariance formula and interpretation.

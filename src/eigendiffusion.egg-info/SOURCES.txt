@@ -15,6 +15,7 @@ src/eigendiffusion/operators.py
 src/eigendiffusion/plotting.py
 src/eigendiffusion/readouts.py
 src/eigendiffusion/references.py
+src/eigendiffusion/temporal.py
 src/eigendiffusion.egg-info/PKG-INFO
 src/eigendiffusion.egg-info/SOURCES.txt
 src/eigendiffusion.egg-info/dependency_links.txt
@@ -26,6 +27,7 @@ tests/test_benchmarking.py
 tests/test_cli_handoff.py
 tests/test_cli_models.py
 tests/test_cli_readouts.py
+tests/test_cli_temporal.py
 tests/test_completion.py
 tests/test_correlated_modal.py
 tests/test_eigenmarkov.py
@@ -35,3 +37,4 @@ tests/test_metrics.py
 tests/test_operators.py
 tests/test_readouts.py
 tests/test_references.py
+tests/test_temporal.py

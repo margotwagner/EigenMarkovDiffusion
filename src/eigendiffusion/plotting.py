@@ -26,6 +26,10 @@ def _display_name(model_name: str) -> str:
         "delta_sigma_temporal": "temporal ΔΣ readout",
         "delta_sigma_neighbor": "neighbor ΔΣ readout",
         "unresolved_gaussian_completion": "unresolved Gaussian completion",
+        "analytic_reference": "analytic reference",
+        "full_correlated_modal": "full correlated modal",
+        "handoff_raw": "101→50 handoff + raw",
+        "handoff_completion": "101→50 handoff + rank-10 completion",
     }
     if "+" in model_name:
         model, readout = model_name.split("+", maxsplit=1)
@@ -453,6 +457,69 @@ def plot_completion_rank_sweep(
     axes[1, 1].set_ylabel("mean L1 addition / total mass")
 
     fig.suptitle("Unresolved Gaussian completion rank sweep", y=1.01)
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output
+
+
+def plot_temporal_correlation_comparison(
+    *,
+    lag_times: list[float],
+    covariance_errors: dict[str, list[float]],
+    impulse_correlations: dict[str, list[float]],
+    window_correlations: dict[str, list[float]],
+    profile_positions: FloatArray,
+    profile_covariances: dict[str, FloatArray],
+    profile_lag_time: float,
+    output_path: str | Path,
+) -> Path:
+    """Plot cross-time covariance and lag-correlation diagnostics."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.2))
+
+    ax = axes[0, 0]
+    for name, values in covariance_errors.items():
+        ax.plot(lag_times, values, marker="o", label=_display_name(name))
+    ax.set_xlabel("time lag (µs)")
+    ax.set_ylabel("relative Frobenius error")
+    ax.set_title("Cross-time covariance error")
+    ax.set_ylim(bottom=0.0)
+    ax.legend(fontsize=8)
+
+    ax = axes[0, 1]
+    for name, values in impulse_correlations.items():
+        ax.plot(lag_times, values, marker="o", label=_display_name(name))
+    ax.set_xlabel("time lag (µs)")
+    ax.set_ylabel("mean lag correlation")
+    ax.set_title("Impulse-node temporal correlation")
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 0]
+    for name, values in window_correlations.items():
+        ax.plot(lag_times, values, marker="o", label=_display_name(name))
+    ax.set_xlabel("time lag (µs)")
+    ax.set_ylabel("mean lag correlation")
+    ax.set_title("Central-window temporal correlation")
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 1]
+    for name, values in profile_covariances.items():
+        linestyle = "--" if name == "analytic_reference" else "-"
+        ax.plot(
+            profile_positions,
+            values,
+            linestyle,
+            linewidth=1.8,
+            label=_display_name(name),
+        )
+    ax.set_xlabel("distance (µm)")
+    ax.set_ylabel("mean diagonal cross-time covariance")
+    ax.set_title(f"Spatial persistence profile at lag {profile_lag_time:g} µs")
+    ax.legend(fontsize=8)
+
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)
