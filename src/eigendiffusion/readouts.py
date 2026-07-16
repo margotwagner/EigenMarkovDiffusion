@@ -25,6 +25,9 @@ Available readouts
 ``unresolved_gaussian_completion``
     An analytic same-time moment completion that samples omitted eigenmodes
     conditionally on the retained state after a configurable start time.
+``persistent_unresolved_completion``
+    A temporally persistent analytic completion that propagates an unresolved
+    latent state conditioned on consecutive retained states.
 
 These readouts enforce output constraints and shape quantization error. They do
 not, by themselves, repair incorrect stochastic dynamics. In particular, the
@@ -40,7 +43,10 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from .completion import UnresolvedGaussianCompleter
+from .completion import (
+    PersistentUnresolvedGaussianCompleter,
+    UnresolvedGaussianCompleter,
+)
 from .config import DiffusionConfig
 from .correlated_modal import project_to_mass_simplex
 
@@ -51,6 +57,7 @@ ReadoutName = Literal[
     "delta_sigma_temporal",
     "delta_sigma_neighbor",
     "unresolved_gaussian_completion",
+    "persistent_unresolved_completion",
 ]
 READOUT_NAMES: tuple[ReadoutName, ...] = (
     "raw",
@@ -58,6 +65,7 @@ READOUT_NAMES: tuple[ReadoutName, ...] = (
     "delta_sigma_temporal",
     "delta_sigma_neighbor",
     "unresolved_gaussian_completion",
+    "persistent_unresolved_completion",
 )
 
 
@@ -313,6 +321,45 @@ def unresolved_gaussian_completion_readout(
         readout_name="unresolved_gaussian_completion",
     )
 
+
+def persistent_unresolved_completion_readout(
+    raw_counts: FloatArray,
+    total_mass: int,
+    *,
+    config: DiffusionConfig,
+    retained_modes: int,
+    completion_start_time: float = 0.0,
+    completion_rank: int | None = None,
+    completion_ridge: float = 1.0e-2,
+    rng: np.random.Generator | None = None,
+) -> ReadoutResult:
+    """Restore omitted modes with a persistent analytic Gaussian state.
+
+    The unresolved state is initialized from the exact same-time conditional
+    distribution, then propagated from one saved time to the next conditioned
+    on its previous value and the retained states at both times. This preserves
+    substantially more short-lag temporal covariance than independently
+    redrawing the unresolved state at every output time.
+    """
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    if config.n_particles != total_mass:
+        raise ValueError("config.n_particles must match total_mass")
+    completer = PersistentUnresolvedGaussianCompleter(
+        config,
+        retained_modes=retained_modes,
+        completion_start_time=completion_start_time,
+        completion_rank=completion_rank,
+        ridge=completion_ridge,
+    )
+    completed, additions = completer.complete(values, rng=rng)
+    return ReadoutResult(
+        counts=completed,
+        residuals=additions,
+        adjusted_inputs=values.copy(),
+        readout_name="persistent_unresolved_completion",
+    )
+
 def apply_readout(
     raw_counts: FloatArray,
     total_mass: int,
@@ -346,6 +393,21 @@ def apply_readout(
                 "unresolved_gaussian_completion requires config and retained_modes"
             )
         return unresolved_gaussian_completion_readout(
+            raw_counts,
+            total_mass,
+            config=config,
+            retained_modes=retained_modes,
+            completion_start_time=completion_start_time,
+            completion_rank=completion_rank,
+            completion_ridge=completion_ridge,
+            rng=rng,
+        )
+    if readout == "persistent_unresolved_completion":
+        if config is None or retained_modes is None:
+            raise ValueError(
+                "persistent_unresolved_completion requires config and retained_modes"
+            )
+        return persistent_unresolved_completion_readout(
             raw_counts,
             total_mass,
             config=config,

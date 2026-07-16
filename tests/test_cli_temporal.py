@@ -43,3 +43,22 @@ def test_compare_readouts_now_parses_completion_options():
     )
     assert args.completion_start_time == 10.0
     assert args.completion_rank == 10
+
+
+def test_validate_parses_persistent_completion_readout():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "validate",
+            "--modal-model",
+            "handoff_correlated_modal",
+            "--modes",
+            "50",
+            "--readout",
+            "persistent_unresolved_completion",
+            "--completion-rank",
+            "10",
+        ]
+    )
+    assert args.readout == "persistent_unresolved_completion"
+    assert args.completion_rank == 10

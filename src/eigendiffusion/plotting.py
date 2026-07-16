@@ -26,6 +26,8 @@ def _display_name(model_name: str) -> str:
         "delta_sigma_temporal": "temporal ΔΣ readout",
         "delta_sigma_neighbor": "neighbor ΔΣ readout",
         "unresolved_gaussian_completion": "unresolved Gaussian completion",
+        "persistent_unresolved_completion": "persistent unresolved completion",
+        "handoff_persistent_completion": "101→50 handoff + persistent completion",
         "analytic_reference": "analytic reference",
         "full_correlated_modal": "full correlated modal",
         "handoff_raw": "101→50 handoff + raw",

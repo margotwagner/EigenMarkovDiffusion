@@ -12,7 +12,10 @@ from .baselines import (
     multinomial_random_walk_diffusion,
     naive_random_walk_diffusion,
 )
-from .completion import UnresolvedGaussianCompleter
+from .completion import (
+    PersistentUnresolvedGaussianCompleter,
+    UnresolvedGaussianCompleter,
+)
 from .config import DiffusionConfig
 from .correlated_modal import (
     BankedCorrelatedModalDiffusion,
@@ -233,12 +236,15 @@ def apply_readout_ensemble(
     original modal trajectories are never modified.
     """
 
-    if readout == "unresolved_gaussian_completion":
+    completion_readouts = {
+        "unresolved_gaussian_completion": UnresolvedGaussianCompleter,
+        "persistent_unresolved_completion": PersistentUnresolvedGaussianCompleter,
+    }
+    completer_class = completion_readouts.get(readout)
+    if completer_class is not None:
         if retained_modes is None:
-            raise ValueError(
-                "unresolved_gaussian_completion requires retained_modes"
-            )
-        completer = UnresolvedGaussianCompleter(
+            raise ValueError(f"{readout} requires retained_modes")
+        completer = completer_class(
             config,
             retained_modes=retained_modes,
             completion_start_time=completion_start_time,
@@ -281,7 +287,7 @@ def apply_readout_ensemble(
     auxiliary = {} if ensemble.auxiliary is None else dict(ensemble.auxiliary)
     stacked_residual = np.stack(residual_l1_fraction).astype(float, copy=False)
     auxiliary["readout_residual_l1_fraction"] = stacked_residual
-    if readout == "unresolved_gaussian_completion":
+    if readout in completion_readouts:
         auxiliary["completion_l1_fraction"] = stacked_residual
 
     return EnsembleResult(

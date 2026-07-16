@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: eigendiffusion
-Version: 0.8.0
+Version: 0.9.0
 Summary: Stochastic diffusion using Markov dynamics in a Laplacian eigenbasis
 Author: Margot Wagner
 Requires-Python: >=3.10
@@ -530,3 +530,76 @@ python -m eigendiffusion compare-temporal-correlation \
 
 See [`docs/TEMPORAL_CORRELATION_DIAGNOSTICS.md`](docs/TEMPORAL_CORRELATION_DIAGNOSTICS.md)
 for the exact cross-time covariance formula and interpretation.
+
+## Persistent unresolved Gaussian completion
+
+Version 0.9 adds a temporally persistent alternative to the same-time
+`unresolved_gaussian_completion` readout. The original readout redraws the
+omitted modal field independently at every saved time. The persistent readout
+instead maintains a latent unresolved state and samples
+
+```text
+u(t + 1) | u(t), r(t), r(t + 1)
+```
+
+from the analytic Gaussian conditional distribution implied by the exact
+multinomial same-time and one-step cross-time covariance. This preserves the
+retained trajectory while improving short-lag temporal persistence.
+
+Run the preferred 101-to-50 handoff with rank-10 persistent completion:
+
+```bash
+mkdir -p outputs/persistent_completion/t10_m50_r10_r500
+
+python -m eigendiffusion validate \
+  --modal-model handoff_correlated_modal \
+  --initial-modes 101 \
+  --modes 50 \
+  --handoff-time 10 \
+  --readout persistent_unresolved_completion \
+  --completion-start-time 10 \
+  --completion-rank 10 \
+  --completion-ridge 0.01 \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 500 \
+  --random-walk-method multinomial \
+  --covariance-times 1 5 10 20 50 100 \
+  --seed 0 \
+  --output outputs/persistent_completion/t10_m50_r10_r500/validation.png \
+  --data-output outputs/persistent_completion/t10_m50_r10_r500/validation.npz
+```
+
+The temporal-correlation comparison command now includes both independent
+same-time completion and persistent completion automatically:
+
+```bash
+mkdir -p outputs/persistent_completion/temporal_comparison_r500
+
+python -m eigendiffusion compare-temporal-correlation \
+  --initial-modes 101 \
+  --modes 50 \
+  --handoff-time 10 \
+  --completion-start-time 10 \
+  --completion-rank 10 \
+  --completion-ridge 0.01 \
+  --lags 1 2 5 10 20 \
+  --temporal-start-time 10 \
+  --node-window-radius 10 \
+  --profile-lag 5 \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 500 \
+  --random-walk-method multinomial \
+  --seed 0 \
+  --output outputs/persistent_completion/temporal_comparison_r500/comparison.png \
+  --csv-output outputs/persistent_completion/temporal_comparison_r500/comparison.csv \
+  --data-output outputs/persistent_completion/temporal_comparison_r500/comparison.npz
+```
+
+See [`docs/PERSISTENT_UNRESOLVED_COMPLETION.md`](docs/PERSISTENT_UNRESOLVED_COMPLETION.md)
+for the conditional-transition equations and limitations.

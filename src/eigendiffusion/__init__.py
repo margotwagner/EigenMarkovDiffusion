@@ -13,7 +13,12 @@ from .benchmarking import (
     benchmark_random_walks,
     estimate_random_walk_core_bytes,
 )
-from .completion import CompletionStep, UnresolvedGaussianCompleter
+from .completion import (
+    CompletionStep,
+    PersistentTransitionStep,
+    PersistentUnresolvedGaussianCompleter,
+    UnresolvedGaussianCompleter,
+)
 from .config import DiffusionConfig
 from .correlated_modal import (
     BankedCorrelatedModalDiffusion,
@@ -64,6 +69,7 @@ from .readouts import (
     readout_constraint_diagnostics,
     simplex_bank_readout,
     temporal_delta_sigma_readout,
+    persistent_unresolved_completion_readout,
     unresolved_gaussian_completion_readout,
 )
 from .references import (
@@ -88,6 +94,8 @@ __all__ = [
     "CorrelatedModalDiffusion",
     "CorrelatedModalResult",
     "CompletionStep",
+    "PersistentTransitionStep",
+    "PersistentUnresolvedGaussianCompleter",
     "HandoffCorrelatedModalDiffusion",
     "HandoffCorrelatedModalResult",
     "DiffusionConfig",
@@ -110,6 +118,7 @@ __all__ = [
     "readout_constraint_diagnostics",
     "simplex_bank_readout",
     "temporal_delta_sigma_readout",
+    "persistent_unresolved_completion_readout",
     "unresolved_gaussian_completion_readout",
     "UnresolvedGaussianCompleter",
     "ValidationMetrics",
@@ -149,4 +158,4 @@ __all__ = [
     "valid_time_origins",
 ]
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

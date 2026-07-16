@@ -1106,12 +1106,23 @@ def run_temporal_correlation_comparison(args: argparse.Namespace) -> int:
         completion_ridge=args.completion_ridge,
         seed=args.seed + 10_000,
     )
+    handoff_persistent = apply_readout_ensemble(
+        handoff_raw,
+        config,
+        readout="persistent_unresolved_completion",
+        retained_modes=final_modes,
+        completion_start_time=completion_start,
+        completion_rank=args.completion_rank,
+        completion_ridge=args.completion_ridge,
+        seed=args.seed + 20_000,
+    )
 
     model_runs: dict[str, np.ndarray] = {
         f"random_walk_{args.random_walk_method}": random_walk.runs,
         "full_correlated_modal": full_correlated.runs,
         "handoff_raw": handoff_raw.runs,
         "handoff_completion": handoff_completed.runs,
+        "handoff_persistent_completion": handoff_persistent.runs,
     }
 
     covariance_errors: dict[str, list[float]] = {name: [] for name in model_runs}
@@ -1534,7 +1545,8 @@ def build_parser() -> argparse.ArgumentParser:
         "compare-temporal-correlation",
         help=(
             "Compare exact and empirical cross-time covariance for random walk, "
-            "full correlated, raw handoff, and completed handoff models."
+            "full correlated, raw handoff, independent completion, and "
+            "persistent completion models."
         ),
     )
     _add_shared_arguments(temporal)
