@@ -22,6 +22,9 @@ Available readouts
     of each local quantization error is passed to the next spatial node during
     the same time step; the remainder is carried forward in time. Scan
     direction alternates across time to reduce directional bias.
+``unresolved_gaussian_completion``
+    An analytic same-time moment completion that samples omitted eigenmodes
+    conditionally on the retained state after a configurable start time.
 
 These readouts enforce output constraints and shape quantization error. They do
 not, by themselves, repair incorrect stochastic dynamics. In particular, the
@@ -37,6 +40,8 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from .completion import UnresolvedGaussianCompleter
+from .config import DiffusionConfig
 from .correlated_modal import project_to_mass_simplex
 
 FloatArray = NDArray[np.float64]
@@ -45,12 +50,14 @@ ReadoutName = Literal[
     "simplex_bank",
     "delta_sigma_temporal",
     "delta_sigma_neighbor",
+    "unresolved_gaussian_completion",
 ]
 READOUT_NAMES: tuple[ReadoutName, ...] = (
     "raw",
     "simplex_bank",
     "delta_sigma_temporal",
     "delta_sigma_neighbor",
+    "unresolved_gaussian_completion",
 )
 
 
@@ -264,12 +271,60 @@ def neighbor_delta_sigma_readout(
     )
 
 
+
+def unresolved_gaussian_completion_readout(
+    raw_counts: FloatArray,
+    total_mass: int,
+    *,
+    config: DiffusionConfig,
+    retained_modes: int,
+    completion_start_time: float = 0.0,
+    completion_rank: int | None = None,
+    completion_ridge: float = 1.0e-2,
+    rng: np.random.Generator | None = None,
+) -> ReadoutResult:
+    """Restore omitted-mode same-time moments with analytic Gaussian sampling.
+
+    The retained spatial trajectory is left unchanged before
+    ``completion_start_time``. At and after that time, the omitted diffusion
+    modes are sampled from a ridge-regularized Gaussian conditional model
+    derived from the exact finite-step multinomial mean and covariance.
+
+    This is an output-only, analytic proof-of-principle closure. It preserves
+    the retained modal coordinates and total mass, but it does not reproduce
+    the exact temporal correlation of the omitted modes.
+    """
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    if config.n_particles != total_mass:
+        raise ValueError("config.n_particles must match total_mass")
+    completer = UnresolvedGaussianCompleter(
+        config,
+        retained_modes=retained_modes,
+        completion_start_time=completion_start_time,
+        completion_rank=completion_rank,
+        ridge=completion_ridge,
+    )
+    completed, additions = completer.complete(values, rng=rng)
+    return ReadoutResult(
+        counts=completed,
+        residuals=additions,
+        adjusted_inputs=values.copy(),
+        readout_name="unresolved_gaussian_completion",
+    )
+
 def apply_readout(
     raw_counts: FloatArray,
     total_mass: int,
     *,
     readout: ReadoutName = "raw",
     spatial_error_fraction: float = 0.5,
+    config: DiffusionConfig | None = None,
+    retained_modes: int | None = None,
+    completion_start_time: float = 0.0,
+    completion_rank: int | None = None,
+    completion_ridge: float = 1.0e-2,
+    rng: np.random.Generator | None = None,
 ) -> ReadoutResult:
     """Apply one named output readout to a modal spatial trajectory."""
 
@@ -284,6 +339,21 @@ def apply_readout(
             raw_counts,
             total_mass,
             spatial_error_fraction=spatial_error_fraction,
+        )
+    if readout == "unresolved_gaussian_completion":
+        if config is None or retained_modes is None:
+            raise ValueError(
+                "unresolved_gaussian_completion requires config and retained_modes"
+            )
+        return unresolved_gaussian_completion_readout(
+            raw_counts,
+            total_mass,
+            config=config,
+            retained_modes=retained_modes,
+            completion_start_time=completion_start_time,
+            completion_rank=completion_rank,
+            completion_ridge=completion_ridge,
+            rng=rng,
         )
     allowed = ", ".join(READOUT_NAMES)
     raise ValueError(f"unknown readout {readout!r}; choose one of: {allowed}")

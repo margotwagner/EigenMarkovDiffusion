@@ -12,6 +12,7 @@ from .baselines import (
     multinomial_random_walk_diffusion,
     naive_random_walk_diffusion,
 )
+from .completion import UnresolvedGaussianCompleter
 from .config import DiffusionConfig
 from .correlated_modal import (
     BankedCorrelatedModalDiffusion,
@@ -219,21 +220,58 @@ def apply_readout_ensemble(
     *,
     readout: ReadoutName = "raw",
     spatial_error_fraction: float = 0.5,
+    retained_modes: int | None = None,
+    completion_start_time: float = 0.0,
+    completion_rank: int | None = None,
+    completion_ridge: float = 1.0e-2,
+    seed: int = 0,
 ) -> EnsembleResult:
     """Apply an output-only readout independently to every ensemble run.
 
-    The input modal trajectories are not modified. Compact residual-balance
-    diagnostics are returned in ``auxiliary``.
+    ``unresolved_gaussian_completion`` precomputes one analytic completion
+    plan and uses independent child random-number streams for each run. The
+    original modal trajectories are never modified.
     """
 
+    if readout == "unresolved_gaussian_completion":
+        if retained_modes is None:
+            raise ValueError(
+                "unresolved_gaussian_completion requires retained_modes"
+            )
+        completer = UnresolvedGaussianCompleter(
+            config,
+            retained_modes=retained_modes,
+            completion_start_time=completion_start_time,
+            completion_rank=completion_rank,
+            ridge=completion_ridge,
+        )
+    else:
+        completer = None
+
+    child_sequences = np.random.SeedSequence(seed).spawn(ensemble.runs.shape[0])
     processed: list[FloatArray] = []
     residual_l1_fraction: list[FloatArray] = []
-    for run in ensemble.runs:
+    for run, sequence in zip(ensemble.runs, child_sequences, strict=True):
+        rng = np.random.default_rng(sequence)
+        if completer is not None:
+            counts, additions = completer.complete(run, rng=rng)
+            processed.append(counts)
+            residual_l1_fraction.append(
+                np.abs(additions).sum(axis=-1) / float(config.n_particles)
+            )
+            continue
+
         result = apply_readout(
             run,
             config.n_particles,
             readout=readout,
             spatial_error_fraction=spatial_error_fraction,
+            config=config,
+            retained_modes=retained_modes,
+            completion_start_time=completion_start_time,
+            completion_rank=completion_rank,
+            completion_ridge=completion_ridge,
+            rng=rng,
         )
         processed.append(result.counts)
         residual_l1_fraction.append(
@@ -241,9 +279,11 @@ def apply_readout_ensemble(
         )
 
     auxiliary = {} if ensemble.auxiliary is None else dict(ensemble.auxiliary)
-    auxiliary["readout_residual_l1_fraction"] = np.stack(
-        residual_l1_fraction
-    ).astype(float, copy=False)
+    stacked_residual = np.stack(residual_l1_fraction).astype(float, copy=False)
+    auxiliary["readout_residual_l1_fraction"] = stacked_residual
+    if readout == "unresolved_gaussian_completion":
+        auxiliary["completion_l1_fraction"] = stacked_residual
+
     return EnsembleResult(
         runs=np.stack(processed).astype(float, copy=False),
         model_name=f"{ensemble.model_name}+{readout}",

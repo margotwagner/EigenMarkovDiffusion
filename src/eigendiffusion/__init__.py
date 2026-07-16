@@ -13,6 +13,7 @@ from .benchmarking import (
     benchmark_random_walks,
     estimate_random_walk_core_bytes,
 )
+from .completion import CompletionStep, UnresolvedGaussianCompleter
 from .config import DiffusionConfig
 from .correlated_modal import (
     BankedCorrelatedModalDiffusion,
@@ -63,6 +64,7 @@ from .readouts import (
     readout_constraint_diagnostics,
     simplex_bank_readout,
     temporal_delta_sigma_readout,
+    unresolved_gaussian_completion_readout,
 )
 from .references import (
     continuous_expected_diffusion,
@@ -78,6 +80,7 @@ __all__ = [
     "BankedCorrelatedModalResult",
     "CorrelatedModalDiffusion",
     "CorrelatedModalResult",
+    "CompletionStep",
     "HandoffCorrelatedModalDiffusion",
     "HandoffCorrelatedModalResult",
     "DiffusionConfig",
@@ -100,6 +103,8 @@ __all__ = [
     "readout_constraint_diagnostics",
     "simplex_bank_readout",
     "temporal_delta_sigma_readout",
+    "unresolved_gaussian_completion_readout",
+    "UnresolvedGaussianCompleter",
     "ValidationMetrics",
     "benchmark_random_walks",
     "continuous_expected_diffusion",
@@ -132,4 +137,4 @@ __all__ = [
     "trajectories_to_counts",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

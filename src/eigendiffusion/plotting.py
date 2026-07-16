@@ -25,10 +25,13 @@ def _display_name(model_name: str) -> str:
         "simplex_bank": "simplex-bank readout",
         "delta_sigma_temporal": "temporal ΔΣ readout",
         "delta_sigma_neighbor": "neighbor ΔΣ readout",
+        "unresolved_gaussian_completion": "unresolved Gaussian completion",
     }
     if "+" in model_name:
         model, readout = model_name.split("+", maxsplit=1)
-        return f"{names.get(model, model.replace('_', ' '))} + {names.get(readout, readout.replace('_', ' '))}"
+        model_text = names.get(model, model.replace("_", " "))
+        readout_text = names.get(readout, readout.replace("_", " "))
+        return f"{model_text} + {readout_text}"
     return names.get(model_name, model_name.replace("_", " "))
 
 
@@ -406,6 +409,50 @@ def plot_random_walk_benchmark(
     axes[1].set_yscale("log")
     axes[1].legend()
 
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output
+
+
+def plot_completion_rank_sweep(
+    ranks: list[int],
+    mean_errors: list[float],
+    variance_errors: list[float],
+    covariance_errors: list[float],
+    negative_mass_fractions: list[float],
+    completion_l1_fractions: list[float],
+    output_path: str | Path,
+) -> Path:
+    """Plot accuracy and physicality against stochastic completion rank."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0))
+
+    axes[0, 0].plot(ranks, mean_errors, marker="o")
+    axes[0, 0].set_title("Mean relative error")
+    axes[0, 0].set_xlabel("completion rank (0 = raw)")
+    axes[0, 0].set_ylabel("relative L2 error")
+
+    axes[0, 1].plot(ranks, variance_errors, marker="o", label="variance")
+    axes[0, 1].plot(ranks, covariance_errors, marker="o", label="covariance")
+    axes[0, 1].set_title("Stochastic moment error")
+    axes[0, 1].set_xlabel("completion rank (0 = raw)")
+    axes[0, 1].set_ylabel("relative error")
+    axes[0, 1].legend()
+
+    axes[1, 0].plot(ranks, negative_mass_fractions, marker="o")
+    axes[1, 0].set_title("Negative reconstructed mass")
+    axes[1, 0].set_xlabel("completion rank (0 = raw)")
+    axes[1, 0].set_ylabel("mean negative mass fraction")
+
+    axes[1, 1].plot(ranks, completion_l1_fractions, marker="o")
+    axes[1, 1].set_title("Added unresolved field")
+    axes[1, 1].set_xlabel("completion rank (0 = raw)")
+    axes[1, 1].set_ylabel("mean L1 addition / total mass")
+
+    fig.suptitle("Unresolved Gaussian completion rank sweep", y=1.01)
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)

@@ -26,6 +26,7 @@ from .metrics import (
 )
 from .plotting import (
     plot_handoff_sweep,
+    plot_completion_rank_sweep,
     plot_mode_sweep,
     plot_model_comparison,
     plot_random_walk_benchmark,
@@ -115,6 +116,30 @@ def _add_readout_argument(parser: argparse.ArgumentParser) -> None:
             "Fraction of Delta-Sigma quantization error borrowed by the next "
             "spatial node; used only by delta_sigma_neighbor."
         ),
+    )
+    parser.add_argument(
+        "--completion-start-time",
+        type=float,
+        default=None,
+        help=(
+            "Start time for unresolved_gaussian_completion. Defaults to the "
+            "handoff time for handoff_correlated_modal and 0 otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--completion-rank",
+        type=int,
+        default=None,
+        help=(
+            "Number of leading unresolved conditional-covariance directions "
+            "to sample. Defaults to all omitted modes."
+        ),
+    )
+    parser.add_argument(
+        "--completion-ridge",
+        type=float,
+        default=1.0e-2,
+        help="Ridge fraction used to stabilize Gaussian conditional completion.",
     )
 
 
@@ -207,7 +232,26 @@ def _readout_diagnostics(ensemble: EnsembleResult, total_particles: int) -> dict
                 ),
             }
         )
+    if ensemble.auxiliary and "completion_l1_fraction" in ensemble.auxiliary:
+        completion = ensemble.auxiliary["completion_l1_fraction"]
+        values.update(
+            {
+                "mean_completion_l1_fraction": float(np.mean(completion)),
+                "maximum_completion_l1_fraction": float(np.max(completion)),
+                "final_mean_completion_l1_fraction": float(
+                    np.mean(completion[:, -1])
+                ),
+            }
+        )
     return values
+
+
+def _resolved_completion_start_time(args: argparse.Namespace) -> float:
+    if args.completion_start_time is not None:
+        return float(args.completion_start_time)
+    if getattr(args, "modal_model", None) == "handoff_correlated_modal":
+        return float(args.handoff_time)
+    return 0.0
 
 
 def _apply_selected_readout(
@@ -215,15 +259,30 @@ def _apply_selected_readout(
     config: DiffusionConfig,
     args: argparse.Namespace,
     *,
+    n_modes: int,
     readout: ReadoutName | None = None,
+    completion_start_time: float | None = None,
+    seed: int | None = None,
 ) -> EnsembleResult:
     selected = args.readout if readout is None else readout
+    start_time = (
+        _resolved_completion_start_time(args)
+        if completion_start_time is None
+        else float(completion_start_time)
+    )
+    readout_seed = args.seed + 10_000 if seed is None else int(seed)
     return apply_readout_ensemble(
         ensemble,
         config,
         readout=selected,
         spatial_error_fraction=args.spatial_error_fraction,
+        retained_modes=n_modes,
+        completion_start_time=start_time,
+        completion_rank=args.completion_rank,
+        completion_ridge=args.completion_ridge,
+        seed=readout_seed,
     )
+
 
 
 def _run_selected_modal(
@@ -269,7 +328,7 @@ def run_validation(args: argparse.Namespace) -> int:
         n_modes=n_modes,
         seed=args.seed + 1,
     )
-    modal = _apply_selected_readout(raw_modal, config, args)
+    modal = _apply_selected_readout(raw_modal, config, args, n_modes=n_modes)
 
     covariance_indices, covariance_times = _nearest_time_indices(
         config.times,
@@ -318,6 +377,9 @@ def run_validation(args: argparse.Namespace) -> int:
         "modal_runs": modal.runs,
         "modal_model": np.asarray(args.modal_model),
         "readout": np.asarray(args.readout),
+        "completion_start_time": np.asarray(_resolved_completion_start_time(args)),
+        "completion_rank": np.asarray(-1 if args.completion_rank is None else args.completion_rank),
+        "completion_ridge": np.asarray(args.completion_ridge),
         "random_walk_runs": random_walk.runs,
         "random_walk_method": np.asarray(args.random_walk_method),
         "times": config.times,
@@ -351,6 +413,9 @@ def run_validation(args: argparse.Namespace) -> int:
             "modal_model": args.modal_model,
             "readout": args.readout,
             "spatial_error_fraction": args.spatial_error_fraction,
+            "completion_start_time": _resolved_completion_start_time(args),
+            "completion_rank": args.completion_rank,
+            "completion_ridge": args.completion_ridge,
             "modal_particle_weight": args.modal_particle_weight,
             "initialization": args.initialization,
             "random_walk_method": args.random_walk_method,
@@ -403,7 +468,9 @@ def run_sweep(args: argparse.Namespace) -> int:
             n_modes=mode_count,
             seed=args.seed + mode_count,
         )
-        ensemble = _apply_selected_readout(raw_ensemble, config, args)
+        ensemble = _apply_selected_readout(
+            raw_ensemble, config, args, n_modes=mode_count
+        )
         diagnostics = summarize_ensemble(
             discrete_reference,
             analytic_variance,
@@ -624,6 +691,11 @@ def run_readout_comparison(args: argparse.Namespace) -> int:
             config,
             readout=readout_name,
             spatial_error_fraction=args.spatial_error_fraction,
+            retained_modes=n_modes,
+            completion_start_time=_resolved_completion_start_time(args),
+            completion_rank=args.completion_rank,
+            completion_ridge=args.completion_ridge,
+            seed=args.seed + 10_000,
         )
         label = f"{args.modal_model}+{readout_name}"
         readout_ensembles[label] = ensemble
@@ -695,6 +767,9 @@ def run_readout_comparison(args: argparse.Namespace) -> int:
             "modal_model": args.modal_model,
             "readouts": list(args.readouts),
             "spatial_error_fraction": args.spatial_error_fraction,
+            "completion_start_time": _resolved_completion_start_time(args),
+            "completion_rank": args.completion_rank,
+            "completion_ridge": args.completion_ridge,
             "covariance_times": covariance_times,
         },
         "diagnostics": diagnostics,
@@ -739,11 +814,21 @@ def run_handoff_sweep(args: argparse.Namespace) -> int:
                 handoff_time=handoff_time,
                 seed=args.seed + int(round(1000 * handoff_time)) + final_mode_count,
             )
+            completion_start = (
+                handoff_time
+                if args.completion_start_time is None
+                else float(args.completion_start_time)
+            )
             ensemble = apply_readout_ensemble(
                 raw,
                 config,
                 readout=args.readout,
                 spatial_error_fraction=args.spatial_error_fraction,
+                retained_modes=final_mode_count,
+                completion_start_time=completion_start,
+                completion_rank=args.completion_rank,
+                completion_ridge=args.completion_ridge,
+                seed=args.seed + 20_000 + int(round(1000 * handoff_time)) + final_mode_count,
             )
             diagnostics = summarize_ensemble(
                 discrete_reference,
@@ -799,6 +884,127 @@ def run_handoff_sweep(args: argparse.Namespace) -> int:
     )
     print(f"Saved {csv_path}")
     print(f"Saved {figure}")
+    return 0
+
+
+def run_completion_rank_sweep(args: argparse.Namespace) -> int:
+    """Sweep unresolved Gaussian completion rank on one shared handoff ensemble."""
+
+    config = _config_from_args(args)
+    n_modes = config.n_nodes if args.modes is None else int(args.modes)
+    max_rank = config.n_nodes - n_modes
+    ranks = sorted(set(int(value) for value in args.completion_ranks))
+    if any(rank < 0 or rank > max_rank for rank in ranks):
+        raise ValueError(
+            f"completion ranks must lie in [0, {max_rank}] for {n_modes} retained modes"
+        )
+
+    discrete_reference = discrete_expected_diffusion(config)
+    analytic_variance = multinomial_marginal_variance(config)
+    analytic_covariance = multinomial_marginal_covariance(config)
+    covariance_indices, covariance_times = _nearest_time_indices(
+        config.times,
+        args.covariance_times,
+        exclude_zero=True,
+    )
+
+    raw = run_modal_ensemble(
+        config,
+        n_runs=args.runs,
+        model="handoff_correlated_modal",
+        n_modes=n_modes,
+        initial_n_modes=args.initial_modes,
+        handoff_time=args.handoff_time,
+        seed=args.seed + 1,
+    )
+
+    rows: list[dict[str, float | int | str | None]] = []
+    for rank in ranks:
+        if rank == 0:
+            ensemble = raw
+            label = "raw"
+        else:
+            ensemble = apply_readout_ensemble(
+                raw,
+                config,
+                readout="unresolved_gaussian_completion",
+                retained_modes=n_modes,
+                completion_start_time=(
+                    args.handoff_time
+                    if args.completion_start_time is None
+                    else args.completion_start_time
+                ),
+                completion_rank=rank,
+                completion_ridge=args.completion_ridge,
+                seed=args.seed + 10_000 + rank,
+            )
+            label = "unresolved_gaussian_completion"
+
+        diagnostics = summarize_ensemble(
+            discrete_reference,
+            analytic_variance,
+            ensemble.runs,
+            config.n_particles,
+            reference_covariance=analytic_covariance,
+            covariance_time_indices=covariance_indices,
+        )
+        completion_l1 = 0.0
+        if ensemble.auxiliary and "completion_l1_fraction" in ensemble.auxiliary:
+            completion_l1 = float(
+                np.mean(ensemble.auxiliary["completion_l1_fraction"])
+            )
+        rows.append(
+            {
+                "modal_model": "handoff_correlated_modal",
+                "readout": label,
+                "initial_n_modes": (
+                    config.n_nodes if args.initial_modes is None else args.initial_modes
+                ),
+                "final_n_modes": n_modes,
+                "handoff_time": args.handoff_time,
+                "completion_rank": rank,
+                "completion_ridge": args.completion_ridge,
+                "mean_completion_l1_fraction": completion_l1,
+                **diagnostics.as_dict(),
+            }
+        )
+        print(
+            f"completion_rank={rank:3d}  "
+            f"mean={diagnostics.mean_relative_l2_error:.6g}  "
+            f"variance={diagnostics.variance_relative_l2_error:.6g}  "
+            f"covariance={diagnostics.covariance_relative_frobenius_error:.6g}"
+        )
+
+    csv_path = Path(args.csv_output)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    figure = plot_completion_rank_sweep(
+        ranks=[int(row["completion_rank"]) for row in rows],
+        mean_errors=[float(row["mean_relative_l2_error"]) for row in rows],
+        variance_errors=[float(row["variance_relative_l2_error"]) for row in rows],
+        covariance_errors=[
+            float(row["covariance_relative_frobenius_error"]) for row in rows
+        ],
+        negative_mass_fractions=[
+            float(row["mean_negative_mass_fraction"]) for row in rows
+        ],
+        completion_l1_fractions=[
+            float(row["mean_completion_l1_fraction"]) for row in rows
+        ],
+        output_path=args.output,
+    )
+    print(f"Saved {csv_path}")
+    print(f"Saved {figure}")
+    print(f"Covariance times: {covariance_times}")
     return 0
 
 
@@ -932,12 +1138,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--readouts",
         nargs="+",
         choices=READOUT_NAMES,
-        default=list(READOUT_NAMES),
+        default=[
+            "raw",
+            "simplex_bank",
+            "delta_sigma_temporal",
+            "delta_sigma_neighbor",
+        ],
     )
     compare_readouts.add_argument(
         "--spatial-error-fraction",
         type=float,
         default=0.5,
+    )
+    compare_readouts.add_argument(
+        "--completion-start-time",
+        type=float,
+        default=None,
+        help=(
+            "Start time for unresolved_gaussian_completion. Defaults to the "
+            "handoff time for handoff_correlated_modal and 0 otherwise."
+        ),
+    )
+    compare_readouts.add_argument(
+        "--completion-rank",
+        type=int,
+        default=None,
+        help=(
+            "Number of unresolved covariance directions to sample. "
+            "Defaults to all omitted modes."
+        ),
+    )
+    compare_readouts.add_argument(
+        "--completion-ridge",
+        type=float,
+        default=1.0e-2,
+        help="Ridge fraction for Gaussian conditional completion.",
     )
     compare_readouts.add_argument("--modes", type=int, default=None)
     compare_readouts.add_argument(
@@ -1002,6 +1237,34 @@ def build_parser() -> argparse.ArgumentParser:
         default="outputs/adaptive_handoff/handoff_sweep.csv",
     )
     handoff_sweep.set_defaults(handler=run_handoff_sweep)
+
+    completion_sweep = subparsers.add_parser(
+        "sweep-completion-rank",
+        help="Sweep unresolved Gaussian completion rank on a shared handoff ensemble.",
+    )
+    _add_shared_arguments(completion_sweep)
+    _add_covariance_arguments(completion_sweep)
+    completion_sweep.add_argument("--modes", type=int, default=50)
+    completion_sweep.add_argument("--initial-modes", type=int, default=None)
+    completion_sweep.add_argument("--handoff-time", type=float, default=10.0)
+    completion_sweep.add_argument("--completion-start-time", type=float, default=None)
+    completion_sweep.add_argument(
+        "--completion-ranks",
+        type=int,
+        nargs="+",
+        default=[0, 5, 10, 20, 51],
+        help="Use rank 0 for the raw handoff baseline.",
+    )
+    completion_sweep.add_argument("--completion-ridge", type=float, default=1.0e-2)
+    completion_sweep.add_argument(
+        "--output",
+        default="outputs/unresolved_completion/completion_rank_sweep.png",
+    )
+    completion_sweep.add_argument(
+        "--csv-output",
+        default="outputs/unresolved_completion/completion_rank_sweep.csv",
+    )
+    completion_sweep.set_defaults(handler=run_completion_rank_sweep)
 
     benchmark = subparsers.add_parser(
         "benchmark-random-walk",

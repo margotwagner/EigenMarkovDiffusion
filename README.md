@@ -13,7 +13,8 @@ The repository contains:
   mass-conserving spatial debt/profit ledger;
 - naive particle-by-particle and aggregated multinomial random-walk baselines;
 - exact continuous/discrete mean, variance, and covariance references;
-- validation, model-comparison, mode-sweep, and benchmark commands.
+- validation, model-comparison, mode-sweep, and benchmark commands;
+- adaptive full-to-reduced modal handoff and analytic unresolved-mode completion.
 
 ## Mathematical setup
 
@@ -226,7 +227,8 @@ src/eigendiffusion/
     operators.py          diffusion operator and eigentransforms
     references.py         exact continuous/discrete moment references
     eigenmarkov.py        independent_modal, unchanged original model
-    correlated_modal.py   correlated and banked correlated prototypes
+    correlated_modal.py   correlated, banked, and handoff modal prototypes
+    completion.py         analytic unresolved-mode Gaussian completion
     baselines.py          naive and multinomial random walks
     ensemble.py           repeated simulations and model selection
     metrics.py            mean, variance, covariance, mass diagnostics
@@ -416,3 +418,65 @@ python -m eigendiffusion sweep-handoff \
 ```
 
 See `docs/ADAPTIVE_HANDOFF.md` for the equations, diagnostics, and limitations.
+
+
+## Analytic unresolved-mode Gaussian completion
+
+Version 0.7 adds an experimental output-only readout that targets the variance
+lost after a full-to-reduced handoff. The retained modal state is left
+unchanged. At and after the handoff, omitted modal coordinates are sampled
+from a ridge-regularized Gaussian conditional model built from the exact
+finite-step multinomial mean and covariance.
+
+This is a proof-of-principle, analytic closure: it uses known reference moments
+and restores same-time statistics, but it does not reproduce the exact
+temporal autocorrelation of the omitted modes.
+
+Validate the recommended 101-to-50 handoff with completion:
+
+```bash
+mkdir -p outputs/unresolved_completion/t10_m50_r500
+
+python -m eigendiffusion validate \
+  --modal-model handoff_correlated_modal \
+  --initial-modes 101 \
+  --modes 50 \
+  --handoff-time 10 \
+  --readout unresolved_gaussian_completion \
+  --completion-start-time 10 \
+  --completion-ridge 0.01 \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 500 \
+  --random-walk-method multinomial \
+  --covariance-times 1 5 10 20 50 100 \
+  --seed 0 \
+  --output outputs/unresolved_completion/t10_m50_r500/validation.png \
+  --data-output outputs/unresolved_completion/t10_m50_r500/validation.npz
+```
+
+Sweep the number of stochastic completion directions while reusing one raw
+handoff ensemble:
+
+```bash
+python -m eigendiffusion sweep-completion-rank \
+  --initial-modes 101 \
+  --modes 50 \
+  --handoff-time 10 \
+  --completion-ranks 0 5 10 20 30 51 \
+  --completion-ridge 0.01 \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --runs 500 \
+  --covariance-times 1 5 10 20 50 100 \
+  --seed 0 \
+  --output outputs/unresolved_completion/completion_rank_sweep.png \
+  --csv-output outputs/unresolved_completion/completion_rank_sweep.csv
+```
+
+Rank `0` is the unchanged raw handoff baseline. See
+[`docs/UNRESOLVED_GAUSSIAN_COMPLETION.md`](docs/UNRESOLVED_GAUSSIAN_COMPLETION.md).

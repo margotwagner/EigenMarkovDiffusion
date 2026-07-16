@@ -1,0 +1,33 @@
+--- a/src/eigendiffusion/cli.py
++++ b/src/eigendiffusion/cli.py
+@@ -1150,6 +1150,30 @@
+         type=float,
+         default=0.5,
+     )
++    compare_readouts.add_argument(
++        "--completion-start-time",
++        type=float,
++        default=None,
++        help=(
++            "Start time for unresolved_gaussian_completion. Defaults to the "
++            "handoff time for handoff_correlated_modal and 0 otherwise."
++        ),
++    )
++    compare_readouts.add_argument(
++        "--completion-rank",
++        type=int,
++        default=None,
++        help=(
++            "Number of unresolved covariance directions to sample. "
++            "Defaults to all omitted modes."
++        ),
++    )
++    compare_readouts.add_argument(
++        "--completion-ridge",
++        type=float,
++        default=1.0e-2,
++        help="Ridge fraction for Gaussian conditional completion.",
++    )
+     compare_readouts.add_argument("--modes", type=int, default=None)
+     compare_readouts.add_argument(
+         "--random-walk-method",
