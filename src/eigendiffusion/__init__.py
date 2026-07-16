@@ -9,9 +9,16 @@ from .baselines import (
     trajectories_to_counts,
 )
 from .benchmarking import (
+    BENCHMARK_METHOD_NAMES,
+    BenchmarkMethodName,
+    DiffusionMethodBenchmark,
     RandomWalkBenchmark,
+    benchmark_diffusion_methods,
     benchmark_random_walks,
+    deep_numpy_nbytes,
     estimate_random_walk_core_bytes,
+    stable_diffusion_config,
+    write_diffusion_method_benchmark_csv,
 )
 from .completion import (
     CompletionStep,
@@ -89,6 +96,8 @@ from .temporal import (
 )
 
 __all__ = [
+    "BENCHMARK_METHOD_NAMES",
+    "BenchmarkMethodName",
     "BankedCorrelatedModalDiffusion",
     "BankedCorrelatedModalResult",
     "CorrelatedModalDiffusion",
@@ -99,6 +108,7 @@ __all__ = [
     "HandoffCorrelatedModalDiffusion",
     "HandoffCorrelatedModalResult",
     "DiffusionConfig",
+    "DiffusionMethodBenchmark",
     "EigenMarkovDiffusion",
     "EigenMarkovResult",
     "EnsembleDiagnostics",
@@ -122,9 +132,11 @@ __all__ = [
     "unresolved_gaussian_completion_readout",
     "UnresolvedGaussianCompleter",
     "ValidationMetrics",
+    "benchmark_diffusion_methods",
     "benchmark_random_walks",
     "continuous_expected_diffusion",
     "deterministic_diffusion",
+    "deep_numpy_nbytes",
     "discrete_expected_diffusion",
     "empirical_covariance",
     "empirical_mean_cross_time_covariance",
@@ -152,10 +164,12 @@ __all__ = [
     "run_naive_random_walk_ensemble",
     "run_random_walk_ensemble",
     "sample_nearest_neighbour_gaussian_noise",
+    "stable_diffusion_config",
     "summarize",
     "summarize_ensemble",
     "trajectories_to_counts",
     "valid_time_origins",
+    "write_diffusion_method_benchmark_csv",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"

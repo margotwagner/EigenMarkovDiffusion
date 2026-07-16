@@ -590,3 +590,52 @@ python -m eigendiffusion compare-temporal-correlation \
 
 See [`docs/PERSISTENT_UNRESOLVED_COMPLETION.md`](docs/PERSISTENT_UNRESOLVED_COMPLETION.md)
 for the conditional-transition equations and limitations.
+
+## End-to-end performance benchmarking
+
+Version 0.10 adds a paired benchmark for the five main computational
+pipelines:
+
+```text
+multinomial_random_walk
+full_correlated_modal
+handoff_raw
+handoff_independent_completion
+handoff_persistent_completion
+```
+
+The benchmark reports one-time setup cost, median trajectory runtime, setup
+amortized over a configurable number of runs, and the NumPy arrays retained by
+setup objects and returned results. The memory metric is not process peak RSS
+and does not include temporary BLAS/LAPACK workspaces.
+
+Start with the standard scaling experiment:
+
+```bash
+mkdir -p outputs/performance
+
+python -m eigendiffusion benchmark-models \
+  --node-counts 31 51 101 201 \
+  --particle-counts 1000 5275 10000 \
+  --base-nodes 101 \
+  --base-particles 5275 \
+  --total-time 100 \
+  --dt 1 \
+  --retained-fraction 0.5 \
+  --handoff-time 10 \
+  --completion-rank 10 \
+  --completion-ridge 0.01 \
+  --repeats 5 \
+  --amortization-runs 100 \
+  --seed 0 \
+  --output outputs/performance/model_scaling.png \
+  --csv-output outputs/performance/model_scaling.csv
+```
+
+For the exact current 101-to-50 architecture, use `--final-modes 50` instead
+of `--retained-fraction 0.5`. The node sweep automatically decreases the
+timestep when necessary so every grid covers the same physical duration while
+respecting the nearest-neighbour stability constraint.
+
+See [`docs/PERFORMANCE_BENCHMARKS.md`](docs/PERFORMANCE_BENCHMARKS.md) for
+metric definitions, recommended quick and full runs, and interpretation.

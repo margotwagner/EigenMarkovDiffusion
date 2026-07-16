@@ -34,6 +34,7 @@ tests/test_eigenmarkov.py
 tests/test_expected_update.py
 tests/test_handoff_correlated_modal.py
 tests/test_metrics.py
+tests/test_model_benchmarking.py
 tests/test_operators.py
 tests/test_persistent_completion.py
 tests/test_readouts.py

@@ -27,11 +27,13 @@ def _display_name(model_name: str) -> str:
         "delta_sigma_neighbor": "neighbor ΔΣ readout",
         "unresolved_gaussian_completion": "unresolved Gaussian completion",
         "persistent_unresolved_completion": "persistent unresolved completion",
-        "handoff_persistent_completion": "101→50 handoff + persistent completion",
-        "analytic_reference": "analytic reference",
+        "multinomial_random_walk": "multinomial random walk",
         "full_correlated_modal": "full correlated modal",
-        "handoff_raw": "101→50 handoff + raw",
-        "handoff_completion": "101→50 handoff + rank-10 completion",
+        "handoff_raw": "101→reduced handoff + raw",
+        "handoff_independent_completion": "handoff + independent completion",
+        "handoff_persistent_completion": "handoff + persistent completion",
+        "analytic_reference": "analytic reference",
+        "handoff_completion": "handoff + rank-10 completion",
     }
     if "+" in model_name:
         model, readout = model_name.split("+", maxsplit=1)
@@ -522,6 +524,89 @@ def plot_temporal_correlation_comparison(
     ax.set_title(f"Spatial persistence profile at lag {profile_lag_time:g} µs")
     ax.legend(fontsize=8)
 
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output
+
+
+def plot_diffusion_method_benchmark(
+    records,
+    output_path: str | Path,
+) -> Path:
+    """Plot runtime, setup cost, and resident-array scaling for main methods."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    methods = []
+    for record in records:
+        if record.method not in methods:
+            methods.append(record.method)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
+
+    node_records = [record for record in records if record.sweep_axis == "nodes"]
+    particle_records = [record for record in records if record.sweep_axis == "particles"]
+
+    for method in methods:
+        selected = sorted(
+            (record for record in node_records if record.method == method),
+            key=lambda record: record.n_nodes,
+        )
+        if selected:
+            nodes = [record.n_nodes for record in selected]
+            run_time = [record.median_run_seconds for record in selected]
+            setup_time = [record.setup_seconds for record in selected]
+            memory = [record.resident_array_megabytes for record in selected]
+            label = _display_name(method)
+            axes[0, 0].plot(nodes, run_time, marker="o", label=label)
+            axes[0, 1].plot(nodes, setup_time, marker="o", label=label)
+            axes[1, 0].plot(nodes, memory, marker="o", label=label)
+
+        selected_particles = sorted(
+            (record for record in particle_records if record.method == method),
+            key=lambda record: record.n_particles,
+        )
+        if selected_particles:
+            particles = [record.n_particles for record in selected_particles]
+            run_time = [record.median_run_seconds for record in selected_particles]
+            axes[1, 1].plot(
+                particles,
+                run_time,
+                marker="o",
+                label=_display_name(method),
+            )
+
+    axes[0, 0].set_title("Per-run runtime vs spatial resolution")
+    axes[0, 0].set_xlabel("number of spatial nodes")
+    axes[0, 0].set_ylabel("median runtime (seconds)")
+    axes[0, 0].set_xscale("log")
+    axes[0, 0].set_yscale("log")
+    axes[0, 0].legend(fontsize=7)
+
+    axes[0, 1].set_title("One-time setup cost vs spatial resolution")
+    axes[0, 1].set_xlabel("number of spatial nodes")
+    axes[0, 1].set_ylabel("setup time (seconds)")
+    axes[0, 1].set_xscale("log")
+    axes[0, 1].set_yscale("symlog", linthresh=1.0e-5)
+
+    axes[1, 0].set_title("Retained NumPy arrays vs spatial resolution")
+    axes[1, 0].set_xlabel("number of spatial nodes")
+    axes[1, 0].set_ylabel("resident arrays (MiB)")
+    axes[1, 0].set_xscale("log")
+    axes[1, 0].set_yscale("log")
+
+    axes[1, 1].set_title("Per-run runtime vs particle count")
+    axes[1, 1].set_xlabel("number of particles")
+    axes[1, 1].set_ylabel("median runtime (seconds)")
+    axes[1, 1].set_xscale("log")
+    axes[1, 1].set_yscale("log")
+
+    fig.suptitle(
+        "End-to-end diffusion method performance\n"
+        "runtime excludes one-time setup; memory counts retained NumPy arrays",
+        y=1.02,
+    )
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)

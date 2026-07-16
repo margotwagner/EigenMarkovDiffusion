@@ -9,7 +9,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .benchmarking import benchmark_random_walks, write_benchmark_csv
+from .benchmarking import (
+    BENCHMARK_METHOD_NAMES,
+    benchmark_diffusion_methods,
+    benchmark_random_walks,
+    write_benchmark_csv,
+    write_diffusion_method_benchmark_csv,
+)
 from .config import DiffusionConfig
 from .ensemble import (
     MODAL_MODEL_NAMES,
@@ -26,6 +32,7 @@ from .metrics import (
     summarize_ensemble,
 )
 from .plotting import (
+    plot_diffusion_method_benchmark,
     plot_handoff_sweep,
     plot_completion_rank_sweep,
     plot_mode_sweep,
@@ -1306,6 +1313,73 @@ def run_temporal_correlation_comparison(args: argparse.Namespace) -> int:
     print(json.dumps(report, indent=2))
     return 0
 
+
+def run_diffusion_method_benchmark(args: argparse.Namespace) -> int:
+    methods = tuple(args.methods)
+    records = benchmark_diffusion_methods(
+        node_counts=sorted(set(args.node_counts)),
+        particle_counts=sorted(set(args.particle_counts)),
+        base_nodes=args.base_nodes,
+        base_particles=args.base_particles,
+        total_time=args.total_time,
+        requested_dt=args.dt,
+        length=args.length,
+        diffusion_coefficient=args.diffusion,
+        impulse_fraction=args.impulse_fraction,
+        methods=methods,
+        final_modes=args.final_modes,
+        retained_fraction=args.retained_fraction,
+        handoff_time=args.handoff_time,
+        completion_rank=args.completion_rank,
+        completion_ridge=args.completion_ridge,
+        repeats=args.repeats,
+        amortization_runs=args.amortization_runs,
+        stability_safety=args.stability_safety,
+        seed=args.seed,
+    )
+    csv_path = write_diffusion_method_benchmark_csv(records, args.csv_output)
+    figure_path = plot_diffusion_method_benchmark(records, args.output)
+
+    print(
+        "axis      size   method                              setup_s  "
+        "run_s    amortized_s  resident_MiB"
+    )
+    for record in records:
+        size = record.n_nodes if record.sweep_axis == "nodes" else record.n_particles
+        print(
+            f"{record.sweep_axis:9s} {size:6d}  {record.method:34s} "
+            f"{record.setup_seconds:8.4f}  {record.median_run_seconds:7.4f}  "
+            f"{record.amortized_seconds_per_run:11.4f}  "
+            f"{record.resident_array_megabytes:12.3f}"
+        )
+
+    report = {
+        "configuration": {
+            "methods": list(methods),
+            "node_counts": sorted(set(args.node_counts)),
+            "particle_counts": sorted(set(args.particle_counts)),
+            "base_nodes": args.base_nodes,
+            "base_particles": args.base_particles,
+            "total_time": args.total_time,
+            "requested_dt": args.dt,
+            "length": args.length,
+            "diffusion_coefficient": args.diffusion,
+            "impulse_fraction": args.impulse_fraction,
+            "final_modes": args.final_modes,
+            "retained_fraction": args.retained_fraction,
+            "handoff_time": args.handoff_time,
+            "completion_rank": args.completion_rank,
+            "completion_ridge": args.completion_ridge,
+            "repeats": args.repeats,
+            "amortization_runs": args.amortization_runs,
+            "stability_safety": args.stability_safety,
+        },
+        "figure": str(figure_path),
+        "csv": str(csv_path),
+    }
+    print(json.dumps(report, indent=2))
+    return 0
+
 def run_random_walk_benchmark(args: argparse.Namespace) -> int:
     base_config = DiffusionConfig(
         n_particles=args.particle_counts[0],
@@ -1599,6 +1673,80 @@ def build_parser() -> argparse.ArgumentParser:
     )
     temporal.add_argument("--data-output", default=None)
     temporal.set_defaults(handler=run_temporal_correlation_comparison)
+
+
+    method_benchmark = subparsers.add_parser(
+        "benchmark-models",
+        help=(
+            "Benchmark multinomial random walk, full correlated modal, raw handoff, "
+            "and independent/persistent completion pipelines."
+        ),
+    )
+    method_benchmark.add_argument(
+        "--methods",
+        nargs="+",
+        choices=BENCHMARK_METHOD_NAMES,
+        default=list(BENCHMARK_METHOD_NAMES),
+    )
+    method_benchmark.add_argument(
+        "--node-counts",
+        type=int,
+        nargs="+",
+        default=[31, 51, 101, 201],
+        help=(
+            "Spatial resolutions for the node-scaling sweep. The timestep is "
+            "automatically reduced when needed to keep the same physical duration."
+        ),
+    )
+    method_benchmark.add_argument(
+        "--particle-counts",
+        type=int,
+        nargs="+",
+        default=[1_000, 5_275, 10_000],
+    )
+    method_benchmark.add_argument("--base-nodes", type=int, default=101)
+    method_benchmark.add_argument("--base-particles", type=int, default=5_275)
+    method_benchmark.add_argument("--total-time", type=float, default=100.0)
+    method_benchmark.add_argument("--dt", type=float, default=1.0)
+    method_benchmark.add_argument("--length", type=float, default=4.0)
+    method_benchmark.add_argument("--diffusion", type=float, default=2.20e-4)
+    method_benchmark.add_argument(
+        "--impulse-fraction",
+        type=float,
+        default=0.59,
+        help="Impulse location as a fraction of the spatial domain.",
+    )
+    method_benchmark.add_argument(
+        "--final-modes",
+        type=int,
+        default=None,
+        help=(
+            "Fixed final mode count. When omitted, each grid retains "
+            "--retained-fraction of its modes."
+        ),
+    )
+    method_benchmark.add_argument("--retained-fraction", type=float, default=0.5)
+    method_benchmark.add_argument("--handoff-time", type=float, default=10.0)
+    method_benchmark.add_argument("--completion-rank", type=int, default=10)
+    method_benchmark.add_argument("--completion-ridge", type=float, default=0.01)
+    method_benchmark.add_argument("--repeats", type=int, default=3)
+    method_benchmark.add_argument(
+        "--amortization-runs",
+        type=int,
+        default=100,
+        help="Number of trajectories over which one-time setup is amortized.",
+    )
+    method_benchmark.add_argument("--stability-safety", type=float, default=0.95)
+    method_benchmark.add_argument("--seed", type=int, default=0)
+    method_benchmark.add_argument(
+        "--output",
+        default="outputs/performance/model_scaling.png",
+    )
+    method_benchmark.add_argument(
+        "--csv-output",
+        default="outputs/performance/model_scaling.csv",
+    )
+    method_benchmark.set_defaults(handler=run_diffusion_method_benchmark)
 
     benchmark = subparsers.add_parser(
         "benchmark-random-walk",
