@@ -1,4 +1,27 @@
-outputs/
-*__pycache__*
-src/eigendiffusion/__pycache__/
-tests/__pycache__/
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Generated experiment output
+outputs/*
+!outputs/.gitkeep
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp

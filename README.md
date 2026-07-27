@@ -1,641 +1,200 @@
 # EigenDiffusion
 
-A reproducible research codebase for stochastic diffusion in a diffusion
-eigenbasis.
+EigenDiffusion is a research package for simulating stochastic diffusion in a
+Laplacian eigenbasis. It compares reduced modal models with particle random
+walks and exact moment references, with particular attention to mean,
+variance, covariance, nonnegativity, and mass conservation.
 
-The repository contains:
+The project is experimental: matching the mean is straightforward, while
+reproducing the full stochastic structure of a spatial particle process with a
+reduced modal model remains the central research question.
 
-- `independent_modal`: the original EigenMarkov two-state model, preserved
-  unchanged and kept as the default;
-- `correlated_modal`: an experimental Gaussian moment-closure model using
-  shared spatial debit-credit noise projected into the eigenbasis;
-- `banked_correlated_modal`: the correlated model with a nonnegative,
-  mass-conserving spatial debt/profit ledger;
-- naive particle-by-particle and aggregated multinomial random-walk baselines;
-- exact continuous/discrete mean, variance, and covariance references;
-- validation, model-comparison, mode-sweep, and benchmark commands;
-- adaptive full-to-reduced modal handoff and analytic unresolved-mode completion.
+## Models
 
-## Mathematical setup
+- `independent_modal` — the original EigenMarkov two-state model and default.
+- `correlated_modal` — Gaussian moment closure with shared spatial
+  debit-credit noise projected into the eigenbasis.
+- `banked_correlated_modal` — correlated modal dynamics followed by a
+  nonnegative, mass-conserving spatial bank.
+- `handoff_correlated_modal` — starts at high modal rank and switches to a
+  reduced basis at a chosen time.
 
-After spatial discretization,
+Output-only readouts can transform a modal trajectory without changing its
+dynamics:
 
-\[
-\frac{d\mathbf n}{dt}=-A\mathbf n,
-\qquad
-A=V\Lambda V^\top,
-\qquad
-\mathbf m=V^\top\mathbf n.
-\]
+- `raw`
+- `simplex_bank`
+- `delta_sigma_temporal`
+- `delta_sigma_neighbor`
+- `unresolved_gaussian_completion`
+- `persistent_unresolved_completion`
 
-The finite-step expected diffusion update is
+See [Modal models](docs/MODAL_MODELS.md) and
+[Mathematical details](docs/MATH.md) for definitions and assumptions.
 
-\[
-\mathbf n_{t+1}=P\mathbf n_t,
-\qquad
-P=I-\Delta t A.
-\]
+## Installation
 
-For independent particles initially placed at one node,
-
-\[
-\mathbf n_t\sim\operatorname{Multinomial}(N,\mathbf p_t),
-\]
-
-with
-
-\[
-\operatorname{Cov}[\mathbf n_t]
-=N\left[\operatorname{diag}(\mathbf p_t)-\mathbf p_t\mathbf p_t^\top\right].
-\]
-
-The project tests whether a reduced modal process can reproduce these moments
-while remaining mass-conserving and physically nonnegative.
-
-See [`docs/MODAL_MODELS.md`](docs/MODAL_MODELS.md) for the exact distinction
-between the three modal formulations.
-
-## Installation with Conda
+Python 3.10 or newer is required.
 
 ```bash
-conda create -n eigendiffusion python=3.11 -y
-conda activate eigendiffusion
-
-cd /path/to/EigenDiffusion
+git clone <repository-url>
+cd EigenMarkovDiffusion
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Verify the installation:
+Confirm the installation:
 
 ```bash
-python --version
 python -m eigendiffusion --help
 pytest
 ruff check .
 ```
 
-Use `python -m eigendiffusion` rather than relying on the standalone shell
-command.
+The module form (`python -m eigendiffusion`) is used below, although installing
+the package also provides an `eigendiffusion` command.
 
-## Recommended run order
+## Quick start
 
-### 1. Confirm the preserved original model
+Run a small validation first:
 
 ```bash
 python -m eigendiffusion validate \
   --modal-model independent_modal \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --modes 101 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 50 100 \
+  --particles 1000 \
+  --nodes 31 \
+  --steps 40 \
+  --runs 20 \
+  --modes 31 \
   --seed 0 \
-  --output outputs/independent_modal_full.png
+  --output outputs/quick_validation.png
 ```
 
-This reproduces the existing EigenMarkov baseline. The old
-`run_eigenmarkov_ensemble` Python API remains available as a backward-compatible
-wrapper around `independent_modal`.
-
-### 2. Validate correlated modal noise
+For a minimal Python example:
 
 ```bash
-python -m eigendiffusion validate \
-  --modal-model correlated_modal \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --modes 101 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 50 100 \
-  --seed 0 \
-  --output outputs/correlated_modal_full.png
+python examples/basic_api.py
 ```
 
-This model should be judged primarily by variance and covariance improvement.
-It may still produce negative spatial values.
-
-### 3. Validate the banked model
-
-```bash
-python -m eigendiffusion validate \
-  --modal-model banked_correlated_modal \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --modes 101 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 50 100 \
-  --seed 0 \
-  --output outputs/banked_correlated_modal_full.png
-```
-
-The banked model should have zero negative mass and near-zero mass error. Its
-JSON report also includes:
-
-- `mean_bank_l1_fraction`;
-- `maximum_bank_l1_fraction`;
-- `final_mean_bank_l1_fraction`.
-
-A large or growing bank means the projection is doing substantial hidden work.
-
-### 4. Compare all models directly
-
-```bash
-python -m eigendiffusion compare-modal-models \
-  --models independent_modal correlated_modal banked_correlated_modal \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --modes 101 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 50 100 \
-  --seed 0 \
-  --output outputs/modal_model_comparison.png \
-  --csv-output outputs/modal_model_comparison.csv
-```
-
-This creates a shared comparison figure, CSV metrics, NPZ arrays, and a JSON
-report printed to the terminal.
-
-### 5. Sweep retained modes separately for each model
-
-```bash
-python -m eigendiffusion sweep-modes \
-  --modal-model independent_modal \
-  --modes 2 5 10 20 50 75 101 \
-  --runs 100 \
-  --error-start-times 0 1 5 10 20 \
-  --seed 0 \
-  --output outputs/mode_sweep_independent.png \
-  --csv-output outputs/mode_sweep_independent.csv
-```
-
-Replace `independent_modal` with `correlated_modal` and
-`banked_correlated_modal` for the other two sweeps. Use distinct output names so
-results are not overwritten.
-
-## Python API
+Or use the API directly:
 
 ```python
 import numpy as np
 
-from eigendiffusion import (
-    BankedCorrelatedModalDiffusion,
-    CorrelatedModalDiffusion,
-    DiffusionConfig,
-    IndependentModalDiffusion,
-)
+from eigendiffusion import DiffusionConfig, IndependentModalDiffusion
 
 config = DiffusionConfig(
-    n_particles=5275,
-    n_nodes=101,
-    n_steps=101,
-    impulse_index=59,
+    n_particles=1_000,
+    n_nodes=31,
+    n_steps=40,
+    impulse_index=15,
+)
+result = IndependentModalDiffusion(config, n_modes=31).run(
+    rng=np.random.default_rng(0)
 )
 
-independent = IndependentModalDiffusion(config, n_modes=101).run(
-    rng=np.random.default_rng(1)
-)
-correlated = CorrelatedModalDiffusion(config, n_modes=101).run(
-    rng=np.random.default_rng(2)
-)
-banked = BankedCorrelatedModalDiffusion(config, n_modes=101).run(
-    rng=np.random.default_rng(3)
-)
+print(result.spatial_counts.shape)
 ```
 
-`EigenMarkovDiffusion` remains an alias-compatible class for the original
-model, but new comparison code should use the explicit name
-`IndependentModalDiffusion`.
+## Command-line workflows
+
+List all options for any command with `--help`:
+
+```bash
+python -m eigendiffusion validate --help
+```
+
+The available workflows are:
+
+| Command | Purpose |
+| --- | --- |
+| `validate` | Compare one modal model with analytic and random-walk references |
+| `sweep-modes` | Measure sensitivity to the number of retained modes |
+| `compare-modal-models` | Compare independent, correlated, and banked models |
+| `compare-readouts` | Apply several readouts to the same modal ensemble |
+| `sweep-handoff` | Sweep handoff times and reduced mode counts |
+| `sweep-completion-rank` | Sweep unresolved Gaussian completion rank |
+| `compare-temporal-correlation` | Compare empirical and exact cross-time covariance |
+| `benchmark-models` | Benchmark full, reduced, and completed model pipelines |
+| `benchmark-random-walk` | Compare particle and aggregated random-walk baselines |
+
+For example, compare the main modal formulations:
+
+```bash
+python -m eigendiffusion compare-modal-models \
+  --models independent_modal correlated_modal banked_correlated_modal \
+  --particles 1000 \
+  --nodes 31 \
+  --steps 40 \
+  --runs 20 \
+  --modes 31 \
+  --seed 0 \
+  --output outputs/model_comparison.png \
+  --csv-output outputs/model_comparison.csv
+```
+
+Generated results belong under `outputs/`, which is ignored by Git except for
+the placeholder that keeps the directory present.
 
 ## Repository layout
 
 ```text
-src/eigendiffusion/
-    config.py             physical and numerical parameters
-    operators.py          diffusion operator and eigentransforms
-    references.py         exact continuous/discrete moment references
-    eigenmarkov.py        independent_modal, unchanged original model
-    correlated_modal.py   correlated, banked, and handoff modal prototypes
-    completion.py         analytic unresolved-mode Gaussian completion
-    baselines.py          naive and multinomial random walks
-    ensemble.py           repeated simulations and model selection
-    metrics.py            mean, variance, covariance, mass diagnostics
-    plotting.py           validation, comparison, sweep, benchmark figures
-    cli.py                command-line interface
-
-tests/                    mathematical and conservation tests
-docs/                     model definitions, math, and project status
-outputs/                  generated results; ignored by Git
+src/eigendiffusion/   package implementation and CLI
+tests/                unit, numerical, and CLI tests
+examples/             small runnable API examples
+docs/                 model notes, mathematics, and experiment guides
+outputs/              generated figures and data (not versioned)
+pyproject.toml        package metadata and development configuration
 ```
 
-## Interpretation cautions
+Useful starting points:
 
-- `correlated_modal` is a Gaussian moment approximation, not an exact discrete
-  particle simulator.
-- `banked_correlated_modal` guarantees physical outputs by projection, but its
-  spatial bank makes it not purely reduced order.
-- Agreement of the mean alone is insufficient. Compare variance, covariance,
-  nonnegativity, mass conservation, and bank magnitude.
-- Keep `independent_modal` as the baseline until the experimental variants are
-  demonstrably better.
+- [Basic API example](examples/basic_api.py)
+- [Modal-model comparison example](examples/compare_modal_models.py)
+- [Readout comparison example](examples/compare_readouts.py)
+- [Performance benchmarks](docs/PERFORMANCE_BENCHMARKS.md)
+- [Adaptive handoff](docs/ADAPTIVE_HANDOFF.md)
+- [Persistent unresolved completion](docs/PERSISTENT_UNRESOLVED_COMPLETION.md)
+- [Temporal correlation diagnostics](docs/TEMPORAL_CORRELATION_DIAGNOSTICS.md)
 
-## Output-only bank and Delta-Sigma readouts
+## Scientific interpretation
 
-Version 0.5 separates the modal dynamics from the physical readout. The
-existing modal models are preserved, including `independent_modal` unchanged.
-The new `--readout` option is applied only after a raw modal trajectory has
-been generated:
+After spatial discretization, the diffusion operator is diagonalized as
 
-```text
-raw
-simplex_bank
-delta_sigma_temporal
-delta_sigma_neighbor
-```
+\[
+A = V\Lambda V^\top,\qquad \mathbf m = V^\top\mathbf n.
+\]
 
-The two Delta-Sigma readouts produce nonnegative integer counts that sum to the
-specified particle total at every saved time. They shape and carry quantization
-error but do not automatically guarantee the correct random-walk distribution;
-mean, variance, covariance, and residual-balance diagnostics must still be
-compared.
+The discrete expected update is
 
-See [`docs/DELTA_SIGMA_READOUTS.md`](docs/DELTA_SIGMA_READOUTS.md).
+\[
+\mathbf n_{t+1} = (I-\Delta t A)\mathbf n_t.
+\]
 
-### Compare all readouts without overwriting previous outputs
+For independent particles with node probabilities \(\mathbf p_t\), the spatial
+reference distribution is multinomial:
+
+\[
+\operatorname{Cov}[\mathbf n_t]
+=N\left(\operatorname{diag}(\mathbf p_t)-\mathbf p_t\mathbf p_t^\top\right).
+\]
+
+When evaluating a model, do not rely on mean agreement alone. Check spatial
+variance and covariance, cross-time covariance, negative mass, total-mass
+error, and bank or completion magnitude where applicable. The correlated and
+banked variants are research prototypes, not established replacements for the
+independent baseline.
+
+## Development
+
+Run the full local checks before committing:
 
 ```bash
-mkdir -p outputs/delta_sigma_readouts/comparisons
-
-python -m eigendiffusion compare-readouts \
-  --modal-model correlated_modal \
-  --readouts raw simplex_bank delta_sigma_temporal delta_sigma_neighbor \
-  --spatial-error-fraction 0.5 \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --modes 101 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 50 100 \
-  --seed 0 \
-  --output outputs/delta_sigma_readouts/comparisons/correlated_full_readout_comparison.png \
-  --csv-output outputs/delta_sigma_readouts/comparisons/correlated_full_readout_comparison.csv \
-  --data-output outputs/delta_sigma_readouts/comparisons/correlated_full_readout_comparison.npz
+pytest
+ruff check .
 ```
 
-The command generates the raw correlated-modal ensemble once and applies every
-readout to the same trajectories, making the comparison paired and preserving
-the prior `outputs/modal_models/` results.
-
-### Validate each readout separately
-
-```bash
-mkdir -p \
-  outputs/delta_sigma_readouts/correlated_modal/raw \
-  outputs/delta_sigma_readouts/correlated_modal/simplex_bank \
-  outputs/delta_sigma_readouts/correlated_modal/delta_sigma_temporal \
-  outputs/delta_sigma_readouts/correlated_modal/delta_sigma_neighbor
-```
-
-Temporal Delta-Sigma:
-
-```bash
-python -m eigendiffusion validate \
-  --modal-model correlated_modal \
-  --readout delta_sigma_temporal \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --modes 101 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 50 100 \
-  --seed 0 \
-  --output outputs/delta_sigma_readouts/correlated_modal/delta_sigma_temporal/full_validation.png \
-  --data-output outputs/delta_sigma_readouts/correlated_modal/delta_sigma_temporal/full_validation.npz
-```
-
-Neighbor-coupled Delta-Sigma:
-
-```bash
-python -m eigendiffusion validate \
-  --modal-model correlated_modal \
-  --readout delta_sigma_neighbor \
-  --spatial-error-fraction 0.5 \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --modes 101 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 50 100 \
-  --seed 0 \
-  --output outputs/delta_sigma_readouts/correlated_modal/delta_sigma_neighbor/full_validation_alpha0p5.png \
-  --data-output outputs/delta_sigma_readouts/correlated_modal/delta_sigma_neighbor/full_validation_alpha0p5.npz
-```
-
-### Sweep retained modes with a fixed readout
-
-```bash
-mkdir -p outputs/delta_sigma_readouts/sweeps
-
-python -m eigendiffusion sweep-modes \
-  --modal-model correlated_modal \
-  --readout delta_sigma_temporal \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --modes 2 5 10 20 50 75 101 \
-  --runs 100 \
-  --error-start-times 0 1 5 10 20 \
-  --seed 0 \
-  --output outputs/delta_sigma_readouts/sweeps/correlated_temporal_delta_sigma_mode_sweep.png \
-  --csv-output outputs/delta_sigma_readouts/sweeps/correlated_temporal_delta_sigma_mode_sweep.csv
-```
-
-## Adaptive full-to-reduced handoff
-
-A fixed reduced basis struggles with the initial impulse because the impulse
-contains high spatial frequencies. The `handoff_correlated_modal` option keeps
-more modes during the early transient and projects to a smaller nested basis at
-a chosen time.
-
-Validate one handoff configuration:
-
-```bash
-python -m eigendiffusion validate \
-  --modal-model handoff_correlated_modal \
-  --initial-modes 101 \
-  --modes 50 \
-  --handoff-time 10 \
-  --readout raw \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 20 50 100 \
-  --seed 0 \
-  --output outputs/adaptive_handoff/handoff_t10_m50/validation.png \
-  --data-output outputs/adaptive_handoff/handoff_t10_m50/validation.npz
-```
-
-Sweep handoff times and final mode counts:
-
-```bash
-python -m eigendiffusion sweep-handoff \
-  --initial-modes 101 \
-  --final-modes 10 20 30 50 \
-  --handoff-times 1 5 10 20 \
-  --readout raw \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 100 \
-  --error-start-times 0 5 10 20 \
-  --late-start-time 20 \
-  --seed 0 \
-  --output outputs/adaptive_handoff/sweeps/handoff_sweep.png \
-  --csv-output outputs/adaptive_handoff/sweeps/handoff_sweep.csv
-```
-
-See `docs/ADAPTIVE_HANDOFF.md` for the equations, diagnostics, and limitations.
-
-
-## Analytic unresolved-mode Gaussian completion
-
-Version 0.7 adds an experimental output-only readout that targets the variance
-lost after a full-to-reduced handoff. The retained modal state is left
-unchanged. At and after the handoff, omitted modal coordinates are sampled
-from a ridge-regularized Gaussian conditional model built from the exact
-finite-step multinomial mean and covariance.
-
-This is a proof-of-principle, analytic closure: it uses known reference moments
-and restores same-time statistics, but it does not reproduce the exact
-temporal autocorrelation of the omitted modes.
-
-Validate the recommended 101-to-50 handoff with completion:
-
-```bash
-mkdir -p outputs/unresolved_completion/t10_m50_r500
-
-python -m eigendiffusion validate \
-  --modal-model handoff_correlated_modal \
-  --initial-modes 101 \
-  --modes 50 \
-  --handoff-time 10 \
-  --readout unresolved_gaussian_completion \
-  --completion-start-time 10 \
-  --completion-ridge 0.01 \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 500 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 10 20 50 100 \
-  --seed 0 \
-  --output outputs/unresolved_completion/t10_m50_r500/validation.png \
-  --data-output outputs/unresolved_completion/t10_m50_r500/validation.npz
-```
-
-Sweep the number of stochastic completion directions while reusing one raw
-handoff ensemble:
-
-```bash
-python -m eigendiffusion sweep-completion-rank \
-  --initial-modes 101 \
-  --modes 50 \
-  --handoff-time 10 \
-  --completion-ranks 0 5 10 20 30 51 \
-  --completion-ridge 0.01 \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 500 \
-  --covariance-times 1 5 10 20 50 100 \
-  --seed 0 \
-  --output outputs/unresolved_completion/completion_rank_sweep.png \
-  --csv-output outputs/unresolved_completion/completion_rank_sweep.csv
-```
-
-Rank `0` is the unchanged raw handoff baseline. See
-[`docs/UNRESOLVED_GAUSSIAN_COMPLETION.md`](docs/UNRESOLVED_GAUSSIAN_COMPLETION.md).
-
-## Cross-time covariance and temporal correlation
-
-Version 0.8 adds a diagnostic command for testing whether stochastic
-fluctuations persist correctly across time. This is the next validation step
-for rank-10 unresolved Gaussian completion, which already matches same-time
-mean, variance, and covariance but resamples its unresolved contribution at
-each output time.
-
-```bash
-mkdir -p outputs/temporal_correlation/t10_m50_completion_r10_r500
-
-python -m eigendiffusion compare-temporal-correlation \
-  --initial-modes 101 \
-  --modes 50 \
-  --handoff-time 10 \
-  --completion-start-time 10 \
-  --completion-rank 10 \
-  --completion-ridge 0.01 \
-  --lags 1 2 5 10 20 \
-  --temporal-start-time 10 \
-  --node-window-radius 10 \
-  --profile-lag 5 \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 500 \
-  --random-walk-method multinomial \
-  --seed 0 \
-  --output outputs/temporal_correlation/t10_m50_completion_r10_r500/comparison.png \
-  --csv-output outputs/temporal_correlation/t10_m50_completion_r10_r500/comparison.csv \
-  --data-output outputs/temporal_correlation/t10_m50_completion_r10_r500/comparison.npz
-```
-
-See [`docs/TEMPORAL_CORRELATION_DIAGNOSTICS.md`](docs/TEMPORAL_CORRELATION_DIAGNOSTICS.md)
-for the exact cross-time covariance formula and interpretation.
-
-## Persistent unresolved Gaussian completion
-
-Version 0.9 adds a temporally persistent alternative to the same-time
-`unresolved_gaussian_completion` readout. The original readout redraws the
-omitted modal field independently at every saved time. The persistent readout
-instead maintains a latent unresolved state and samples
-
-```text
-u(t + 1) | u(t), r(t), r(t + 1)
-```
-
-from the analytic Gaussian conditional distribution implied by the exact
-multinomial same-time and one-step cross-time covariance. This preserves the
-retained trajectory while improving short-lag temporal persistence.
-
-Run the preferred 101-to-50 handoff with rank-10 persistent completion:
-
-```bash
-mkdir -p outputs/persistent_completion/t10_m50_r10_r500
-
-python -m eigendiffusion validate \
-  --modal-model handoff_correlated_modal \
-  --initial-modes 101 \
-  --modes 50 \
-  --handoff-time 10 \
-  --readout persistent_unresolved_completion \
-  --completion-start-time 10 \
-  --completion-rank 10 \
-  --completion-ridge 0.01 \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 500 \
-  --random-walk-method multinomial \
-  --covariance-times 1 5 10 20 50 100 \
-  --seed 0 \
-  --output outputs/persistent_completion/t10_m50_r10_r500/validation.png \
-  --data-output outputs/persistent_completion/t10_m50_r10_r500/validation.npz
-```
-
-The temporal-correlation comparison command now includes both independent
-same-time completion and persistent completion automatically:
-
-```bash
-mkdir -p outputs/persistent_completion/temporal_comparison_r500
-
-python -m eigendiffusion compare-temporal-correlation \
-  --initial-modes 101 \
-  --modes 50 \
-  --handoff-time 10 \
-  --completion-start-time 10 \
-  --completion-rank 10 \
-  --completion-ridge 0.01 \
-  --lags 1 2 5 10 20 \
-  --temporal-start-time 10 \
-  --node-window-radius 10 \
-  --profile-lag 5 \
-  --particles 5275 \
-  --nodes 101 \
-  --steps 101 \
-  --impulse-index 59 \
-  --runs 500 \
-  --random-walk-method multinomial \
-  --seed 0 \
-  --output outputs/persistent_completion/temporal_comparison_r500/comparison.png \
-  --csv-output outputs/persistent_completion/temporal_comparison_r500/comparison.csv \
-  --data-output outputs/persistent_completion/temporal_comparison_r500/comparison.npz
-```
-
-See [`docs/PERSISTENT_UNRESOLVED_COMPLETION.md`](docs/PERSISTENT_UNRESOLVED_COMPLETION.md)
-for the conditional-transition equations and limitations.
-
-## End-to-end performance benchmarking
-
-Version 0.10 adds a paired benchmark for the five main computational
-pipelines:
-
-```text
-multinomial_random_walk
-full_correlated_modal
-handoff_raw
-handoff_independent_completion
-handoff_persistent_completion
-```
-
-The benchmark reports one-time setup cost, median trajectory runtime, setup
-amortized over a configurable number of runs, and the NumPy arrays retained by
-setup objects and returned results. The memory metric is not process peak RSS
-and does not include temporary BLAS/LAPACK workspaces.
-
-Start with the standard scaling experiment:
-
-```bash
-mkdir -p outputs/performance
-
-python -m eigendiffusion benchmark-models \
-  --node-counts 31 51 101 201 \
-  --particle-counts 1000 5275 10000 \
-  --base-nodes 101 \
-  --base-particles 5275 \
-  --total-time 100 \
-  --dt 1 \
-  --retained-fraction 0.5 \
-  --handoff-time 10 \
-  --completion-rank 10 \
-  --completion-ridge 0.01 \
-  --repeats 5 \
-  --amortization-runs 100 \
-  --seed 0 \
-  --output outputs/performance/model_scaling.png \
-  --csv-output outputs/performance/model_scaling.csv
-```
-
-For the exact current 101-to-50 architecture, use `--final-modes 50` instead
-of `--retained-fraction 0.5`. The node sweep automatically decreases the
-timestep when necessary so every grid covers the same physical duration while
-respecting the nearest-neighbour stability constraint.
-
-See [`docs/PERFORMANCE_BENCHMARKS.md`](docs/PERFORMANCE_BENCHMARKS.md) for
-metric definitions, recommended quick and full runs, and interpretation.
+The tests use the `src/` tree directly, so an editable install is convenient
+but not required for `pytest`.
