@@ -40,3 +40,22 @@ def test_sweep_handoff_parser() -> None:
     assert args.initial_modes == 21
     assert args.final_modes == [5, 8]
     assert args.handoff_times == [1.0, 5.0]
+
+
+def test_handoff_selection_parser() -> None:
+    args = build_parser().parse_args(
+        [
+            "study-handoff-selection",
+            "--final-modes",
+            "25",
+            "50",
+            "--handoff-times",
+            "3",
+            "12",
+            "--runs",
+            "200",
+        ]
+    )
+    assert args.final_modes == [25, 50]
+    assert args.handoff_times == [3.0, 12.0]
+    assert args.runs == 200

@@ -239,6 +239,14 @@ def apply_readout_ensemble(
     completion_readouts = {
         "unresolved_gaussian_completion": UnresolvedGaussianCompleter,
         "persistent_unresolved_completion": PersistentUnresolvedGaussianCompleter,
+        "unresolved_gaussian_completion_simplex_bank": UnresolvedGaussianCompleter,
+        "persistent_unresolved_completion_simplex_bank": (
+            PersistentUnresolvedGaussianCompleter
+        ),
+    }
+    completion_constraints = {
+        "unresolved_gaussian_completion_simplex_bank": "simplex_bank",
+        "persistent_unresolved_completion_simplex_bank": "simplex_bank",
     }
     completer_class = completion_readouts.get(readout)
     if completer_class is not None:
@@ -257,14 +265,30 @@ def apply_readout_ensemble(
     child_sequences = np.random.SeedSequence(seed).spawn(ensemble.runs.shape[0])
     processed: list[FloatArray] = []
     residual_l1_fraction: list[FloatArray] = []
+    completion_l1_fraction: list[FloatArray] = []
     for run, sequence in zip(ensemble.runs, child_sequences, strict=True):
         rng = np.random.default_rng(sequence)
         if completer is not None:
             counts, additions = completer.complete(run, rng=rng)
-            processed.append(counts)
-            residual_l1_fraction.append(
+            completion_l1_fraction.append(
                 np.abs(additions).sum(axis=-1) / float(config.n_particles)
             )
+            constraint = completion_constraints.get(readout)
+            if constraint is None:
+                processed.append(counts)
+                residual_l1_fraction.append(
+                    np.abs(additions).sum(axis=-1) / float(config.n_particles)
+                )
+            else:
+                result = apply_readout(
+                    counts,
+                    config.n_particles,
+                    readout=constraint,
+                )
+                processed.append(result.counts)
+                residual_l1_fraction.append(
+                    result.residual_l1 / float(config.n_particles)
+                )
             continue
 
         result = apply_readout(
@@ -287,8 +311,12 @@ def apply_readout_ensemble(
     auxiliary = {} if ensemble.auxiliary is None else dict(ensemble.auxiliary)
     stacked_residual = np.stack(residual_l1_fraction).astype(float, copy=False)
     auxiliary["readout_residual_l1_fraction"] = stacked_residual
-    if readout in completion_readouts:
-        auxiliary["completion_l1_fraction"] = stacked_residual
+    if readout in completion_constraints:
+        auxiliary["constraint_residual_l1_fraction"] = stacked_residual
+    if completion_l1_fraction:
+        auxiliary["completion_l1_fraction"] = np.stack(
+            completion_l1_fraction
+        ).astype(float, copy=False)
 
     return EnsembleResult(
         runs=np.stack(processed).astype(float, copy=False),

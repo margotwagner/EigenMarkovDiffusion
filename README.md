@@ -114,6 +114,7 @@ The available workflows are:
 | `sweep-modes` | Measure sensitivity to the number of retained modes |
 | `compare-modal-models` | Compare independent, correlated, and banked models |
 | `study-trial-convergence` | Measure error convergence from 100–5,000 trials with bootstrap intervals |
+| `study-handoff-selection` | Predict and validate handoff-time/rank accuracy-work tradeoffs |
 | `compare-readouts` | Apply several readouts to the same modal ensemble |
 | `sweep-handoff` | Sweep handoff times and reduced mode counts |
 | `sweep-completion-rank` | Sweep unresolved Gaussian completion rank |
@@ -160,6 +161,24 @@ The comparison figure shows time-resolved relative mean-profile error rather
 than nearly overlapping mean curves. CSV diagnostics additionally include the
 maximum and final-time mean/variance errors and the sampled mean error relative
 to the multinomial reference's expected Monte Carlo standard error.
+
+Predict handoff error and validate a candidate grid with stochastic ensembles:
+
+```bash
+python -m eigendiffusion study-handoff-selection \
+  --initial-modes 101 \
+  --final-modes 35 50 60 75 \
+  --handoff-times 10 15 20 30 \
+  --runs 250 \
+  --covariance-times 1 5 20 50 100 \
+  --output outputs/handoff_selection/validated_grid_r250.png \
+  --csv-output outputs/handoff_selection/validated_grid_r250.csv
+```
+
+The completion-rank sweep accepts independent, persistent, and simplex-banked
+completion readouts and reports both same-time and cross-time covariance error.
+See [predictive handoff selection](docs/HANDOFF_SELECTION.md) and
+[completion selection](docs/COMPLETION_SELECTION.md) for the completed studies.
 
 ## Repository layout
 

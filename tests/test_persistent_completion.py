@@ -102,6 +102,37 @@ def test_persistent_completion_is_reproducible() -> None:
     np.testing.assert_array_equal(first.runs, second.runs)
 
 
+def test_persistent_completion_simplex_bank_is_physical() -> None:
+    config = persistent_config()
+    raw = run_modal_ensemble(
+        config,
+        n_runs=3,
+        model="handoff_correlated_modal",
+        n_modes=15,
+        initial_n_modes=config.n_nodes,
+        handoff_time=10.0,
+        seed=40,
+    )
+    constrained = apply_readout_ensemble(
+        raw,
+        config,
+        readout="persistent_unresolved_completion_simplex_bank",
+        retained_modes=15,
+        completion_start_time=10.0,
+        completion_rank=5,
+        seed=41,
+    )
+    assert np.min(constrained.runs) >= 0.0
+    np.testing.assert_allclose(
+        constrained.runs.sum(axis=-1),
+        config.n_particles,
+        atol=1.0e-9,
+    )
+    assert constrained.auxiliary is not None
+    assert "completion_l1_fraction" in constrained.auxiliary
+    assert "constraint_residual_l1_fraction" in constrained.auxiliary
+
+
 def test_persistent_completion_improves_one_step_temporal_correlation() -> None:
     config = persistent_config()
     raw = run_modal_ensemble(

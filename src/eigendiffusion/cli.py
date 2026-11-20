@@ -26,6 +26,7 @@ from .ensemble import (
     run_modal_ensemble,
     run_random_walk_ensemble,
 )
+from .handoff import pareto_handoff_indices, predict_handoff_grid
 from .metrics import (
     bootstrap_error_intervals,
     relative_frobenius_error,
@@ -37,6 +38,7 @@ from .metrics import (
 from .plotting import (
     plot_diffusion_method_benchmark,
     plot_handoff_sweep,
+    plot_handoff_selection,
     plot_completion_rank_sweep,
     plot_mode_sweep,
     plot_model_comparison,
@@ -269,6 +271,17 @@ def _readout_diagnostics(ensemble: EnsembleResult, total_particles: int) -> dict
                 "maximum_completion_l1_fraction": float(np.max(completion)),
                 "final_mean_completion_l1_fraction": float(
                     np.mean(completion[:, -1])
+                ),
+            }
+        )
+    if ensemble.auxiliary and "constraint_residual_l1_fraction" in ensemble.auxiliary:
+        constraint = ensemble.auxiliary["constraint_residual_l1_fraction"]
+        values.update(
+            {
+                "mean_constraint_residual_l1_fraction": float(np.mean(constraint)),
+                "maximum_constraint_residual_l1_fraction": float(np.max(constraint)),
+                "final_mean_constraint_residual_l1_fraction": float(
+                    np.mean(constraint[:, -1])
                 ),
             }
         )
@@ -958,6 +971,225 @@ def run_readout_comparison(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_handoff_selection_study(args: argparse.Namespace) -> int:
+    """Predict handoff error and optionally validate it with stochastic runs."""
+
+    config = _config_from_args(args)
+    initial_modes = config.n_nodes if args.initial_modes is None else args.initial_modes
+    final_modes = sorted(set(args.final_modes))
+    handoff_times = sorted(set(float(value) for value in args.handoff_times))
+    covariance_indices, covariance_times = _nearest_time_indices(
+        config.times,
+        args.covariance_times,
+        exclude_zero=True,
+    )
+    predictions = predict_handoff_grid(
+        config,
+        final_modes=final_modes,
+        handoff_times=handoff_times,
+        covariance_time_indices=covariance_indices,
+        initial_n_modes=initial_modes,
+    )
+    frontier = pareto_handoff_indices(predictions)
+    rows: list[dict[str, float | int | str | bool | None]] = []
+    for index, prediction in enumerate(predictions):
+        values: dict[str, float | int | str | bool | None] = {
+            **prediction.as_dict(),
+            "pareto_optimal": index in frontier,
+            "meets_tolerances": (
+                prediction.predicted_mean_relative_l2_error <= args.mean_tolerance
+                and prediction.predicted_variance_relative_l2_error
+                <= args.variance_tolerance
+                and prediction.predicted_covariance_relative_frobenius_error
+                <= args.covariance_tolerance
+            ),
+        }
+        rows.append(values)
+
+    feasible = [row for row in rows if bool(row["meets_tolerances"])]
+    if feasible:
+        compute_choice = min(
+            feasible,
+            key=lambda row: float(row["modal_update_fraction_of_full"]),
+        )
+        compute_choice["recommendation"] = "lowest_work_within_tolerances"
+    pareto_rows = [row for row in rows if bool(row["pareto_optimal"])]
+    if pareto_rows:
+        accuracy_choice = min(
+            pareto_rows,
+            key=lambda row: (
+                float(row["predicted_mean_relative_l2_error"])
+                + float(row["predicted_variance_relative_l2_error"])
+                + float(row["predicted_covariance_relative_frobenius_error"])
+            ),
+        )
+        existing = accuracy_choice.get("recommendation")
+        accuracy_choice["recommendation"] = (
+            "accuracy_first"
+            if existing is None
+            else f"{existing};accuracy_first"
+        )
+
+    if args.runs > 0:
+        discrete_reference = discrete_expected_diffusion(config)
+        analytic_variance = multinomial_marginal_variance(config)
+        analytic_covariance = multinomial_marginal_covariance(config)
+        print(f"Simulating full correlated baseline: {args.runs} trials", flush=True)
+        baseline = run_modal_ensemble(
+            config,
+            n_runs=args.runs,
+            model="correlated_modal",
+            n_modes=initial_modes,
+            seed=args.seed,
+        )
+        baseline_diagnostics = summarize_ensemble(
+            discrete_reference,
+            analytic_variance,
+            baseline.runs,
+            config.n_particles,
+            reference_covariance=analytic_covariance,
+            covariance_time_indices=covariance_indices,
+        )
+        baseline_mean = baseline_diagnostics.mean_relative_l2_error
+        baseline_variance = baseline_diagnostics.variance_relative_l2_error
+        baseline_covariance = float(
+            baseline_diagnostics.covariance_relative_frobenius_error
+        )
+        del baseline
+        gc.collect()
+
+        for row_index, (row, prediction) in enumerate(zip(rows, predictions, strict=True)):
+            print(
+                f"Validating handoff={prediction.handoff_time:g} us, "
+                f"modes={prediction.final_n_modes}: {args.runs} trials",
+                flush=True,
+            )
+            ensemble = run_modal_ensemble(
+                config,
+                n_runs=args.runs,
+                model="handoff_correlated_modal",
+                n_modes=prediction.final_n_modes,
+                initial_n_modes=initial_modes,
+                handoff_time=prediction.handoff_time,
+                seed=args.seed + 1_000 + row_index,
+            )
+            diagnostics = summarize_ensemble(
+                discrete_reference,
+                analytic_variance,
+                ensemble.runs,
+                config.n_particles,
+                reference_covariance=analytic_covariance,
+                covariance_time_indices=covariance_indices,
+            )
+            row.update(
+                {
+                    "baseline_mean_relative_l2_error": baseline_mean,
+                    "baseline_variance_relative_l2_error": baseline_variance,
+                    "baseline_covariance_relative_frobenius_error": baseline_covariance,
+                    "predicted_mean_with_sampling_error": float(
+                        np.hypot(
+                            prediction.predicted_mean_relative_l2_error,
+                            baseline_mean,
+                        )
+                    ),
+                    "predicted_variance_with_sampling_error": float(
+                        np.hypot(
+                            prediction.predicted_variance_relative_l2_error,
+                            baseline_variance,
+                        )
+                    ),
+                    "predicted_covariance_with_sampling_error": float(
+                        np.hypot(
+                            prediction.predicted_covariance_relative_frobenius_error,
+                            baseline_covariance,
+                        )
+                    ),
+                    "observed_mean_relative_l2_error": diagnostics.mean_relative_l2_error,
+                    "observed_variance_relative_l2_error": (
+                        diagnostics.variance_relative_l2_error
+                    ),
+                    "observed_covariance_relative_frobenius_error": (
+                        diagnostics.covariance_relative_frobenius_error
+                    ),
+                    **_handoff_diagnostics(ensemble),
+                }
+            )
+            del ensemble
+            gc.collect()
+
+    csv_path = Path(args.csv_output)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    figure = plot_handoff_selection(
+        rows=rows,
+        final_modes=final_modes,
+        handoff_times=handoff_times,
+        output_path=args.output,
+    )
+    validation_summary: dict[str, dict[str, float]] = {}
+    if args.runs > 0:
+        validation_specs = {
+            "mean": (
+                "predicted_mean_with_sampling_error",
+                "observed_mean_relative_l2_error",
+            ),
+            "variance": (
+                "predicted_variance_with_sampling_error",
+                "observed_variance_relative_l2_error",
+            ),
+            "covariance": (
+                "predicted_covariance_with_sampling_error",
+                "observed_covariance_relative_frobenius_error",
+            ),
+        }
+        for name, (predicted_key, observed_key) in validation_specs.items():
+            predicted = np.asarray([float(row[predicted_key]) for row in rows])
+            observed = np.asarray([float(row[observed_key]) for row in rows])
+            validation_summary[name] = {
+                "correlation": float(np.corrcoef(predicted, observed)[0, 1]),
+                "relative_rmse": float(
+                    np.linalg.norm(predicted - observed) / np.linalg.norm(observed)
+                ),
+                "median_prediction_to_observation_ratio": float(
+                    np.median(predicted / observed)
+                ),
+            }
+    report = {
+        "configuration": {
+            "particles": config.n_particles,
+            "nodes": config.n_nodes,
+            "steps": config.n_steps,
+            "initial_modes": initial_modes,
+            "final_modes": final_modes,
+            "handoff_times": handoff_times,
+            "validation_runs": args.runs,
+            "covariance_times": covariance_times,
+            "tolerances": {
+                "mean": args.mean_tolerance,
+                "variance": args.variance_tolerance,
+                "covariance": args.covariance_tolerance,
+            },
+        },
+        "recommendations": [
+            row for row in rows if row.get("recommendation") is not None
+        ],
+        "validation_summary": validation_summary,
+        "figure": str(figure),
+        "csv": str(csv_path),
+    }
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def run_handoff_sweep(args: argparse.Namespace) -> int:
     """Sweep handoff times and final mode counts for adaptive correlated diffusion."""
 
@@ -1065,7 +1297,7 @@ def run_handoff_sweep(args: argparse.Namespace) -> int:
 
 
 def run_completion_rank_sweep(args: argparse.Namespace) -> int:
-    """Sweep unresolved Gaussian completion rank on one shared handoff ensemble."""
+    """Sweep completion rank, persistence, and optional physical constraints."""
 
     config = _config_from_args(args)
     n_modes = config.n_nodes if args.modes is None else int(args.modes)
@@ -1095,62 +1327,99 @@ def run_completion_rank_sweep(args: argparse.Namespace) -> int:
         seed=args.seed + 1,
     )
 
+    completion_start = (
+        args.handoff_time
+        if args.completion_start_time is None
+        else args.completion_start_time
+    )
+    lag_steps = int(round(args.temporal_lag / config.dt))
+    if lag_steps <= 0 or not np.isclose(lag_steps * config.dt, args.temporal_lag):
+        raise ValueError("temporal_lag must be a positive integer multiple of dt")
+    start_step = _nearest_step(config.times, completion_start)
+    temporal_origins = valid_time_origins(
+        config.n_steps,
+        lag_steps,
+        start_step=start_step,
+    )
+    reference_temporal_covariance = multinomial_mean_cross_time_covariance(
+        config,
+        lag_steps,
+        start_indices=temporal_origins,
+    )
+
     rows: list[dict[str, float | int | str | None]] = []
     for rank in ranks:
         if rank == 0:
-            ensemble = raw
-            label = "raw"
+            candidates = [("raw", raw)]
         else:
-            ensemble = apply_readout_ensemble(
-                raw,
-                config,
-                readout="unresolved_gaussian_completion",
-                retained_modes=n_modes,
-                completion_start_time=(
-                    args.handoff_time
-                    if args.completion_start_time is None
-                    else args.completion_start_time
-                ),
-                completion_rank=rank,
-                completion_ridge=args.completion_ridge,
-                seed=args.seed + 10_000 + rank,
-            )
-            label = "unresolved_gaussian_completion"
+            candidates = []
+            for readout in args.completion_readouts:
+                completion_family = (
+                    0 if readout.startswith("unresolved_gaussian") else 1
+                )
+                ensemble = apply_readout_ensemble(
+                    raw,
+                    config,
+                    readout=readout,
+                    retained_modes=n_modes,
+                    completion_start_time=completion_start,
+                    completion_rank=rank,
+                    completion_ridge=args.completion_ridge,
+                    seed=args.seed + 10_000 + 100 * rank + completion_family,
+                )
+                candidates.append((readout, ensemble))
 
-        diagnostics = summarize_ensemble(
-            discrete_reference,
-            analytic_variance,
-            ensemble.runs,
-            config.n_particles,
-            reference_covariance=analytic_covariance,
-            covariance_time_indices=covariance_indices,
-        )
-        completion_l1 = 0.0
-        if ensemble.auxiliary and "completion_l1_fraction" in ensemble.auxiliary:
-            completion_l1 = float(
-                np.mean(ensemble.auxiliary["completion_l1_fraction"])
+        for label, ensemble in candidates:
+            diagnostics = summarize_ensemble(
+                discrete_reference,
+                analytic_variance,
+                ensemble.runs,
+                config.n_particles,
+                reference_covariance=analytic_covariance,
+                covariance_time_indices=covariance_indices,
             )
-        rows.append(
-            {
-                "modal_model": "handoff_correlated_modal",
-                "readout": label,
-                "initial_n_modes": (
-                    config.n_nodes if args.initial_modes is None else args.initial_modes
-                ),
-                "final_n_modes": n_modes,
-                "handoff_time": args.handoff_time,
-                "completion_rank": rank,
-                "completion_ridge": args.completion_ridge,
-                "mean_completion_l1_fraction": completion_l1,
-                **diagnostics.as_dict(),
-            }
-        )
-        print(
-            f"completion_rank={rank:3d}  "
-            f"mean={diagnostics.mean_relative_l2_error:.6g}  "
-            f"variance={diagnostics.variance_relative_l2_error:.6g}  "
-            f"covariance={diagnostics.covariance_relative_frobenius_error:.6g}"
-        )
+            observed_temporal_covariance = empirical_mean_cross_time_covariance(
+                ensemble.runs,
+                lag_steps,
+                start_indices=temporal_origins,
+            )
+            temporal_error = relative_frobenius_error(
+                reference_temporal_covariance,
+                observed_temporal_covariance,
+            )
+            completion_l1 = 0.0
+            if ensemble.auxiliary and "completion_l1_fraction" in ensemble.auxiliary:
+                completion_l1 = float(
+                    np.mean(ensemble.auxiliary["completion_l1_fraction"])
+                )
+            rows.append(
+                {
+                    "modal_model": "handoff_correlated_modal",
+                    "readout": label,
+                    "initial_n_modes": (
+                        config.n_nodes
+                        if args.initial_modes is None
+                        else args.initial_modes
+                    ),
+                    "final_n_modes": n_modes,
+                    "handoff_time": args.handoff_time,
+                    "completion_rank": rank,
+                    "completion_ridge": args.completion_ridge,
+                    "temporal_lag": args.temporal_lag,
+                    "cross_time_covariance_relative_frobenius_error": temporal_error,
+                    "mean_completion_l1_fraction": completion_l1,
+                    **diagnostics.as_dict(),
+                    **_readout_diagnostics(ensemble, config.n_particles),
+                }
+            )
+            print(
+                f"readout={label:48s}  completion_rank={rank:3d}  "
+                f"mean={diagnostics.mean_relative_l2_error:.6g}  "
+                f"variance={diagnostics.variance_relative_l2_error:.6g}  "
+                f"covariance={diagnostics.covariance_relative_frobenius_error:.6g}  "
+                f"temporal={temporal_error:.6g}",
+                flush=True,
+            )
 
     csv_path = Path(args.csv_output)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1165,18 +1434,7 @@ def run_completion_rank_sweep(args: argparse.Namespace) -> int:
         writer.writerows(rows)
 
     figure = plot_completion_rank_sweep(
-        ranks=[int(row["completion_rank"]) for row in rows],
-        mean_errors=[float(row["mean_relative_l2_error"]) for row in rows],
-        variance_errors=[float(row["variance_relative_l2_error"]) for row in rows],
-        covariance_errors=[
-            float(row["covariance_relative_frobenius_error"]) for row in rows
-        ],
-        negative_mass_fractions=[
-            float(row["mean_negative_mass_fraction"]) for row in rows
-        ],
-        completion_l1_fractions=[
-            float(row["mean_completion_l1_fraction"]) for row in rows
-        ],
+        rows=rows,
         output_path=args.output,
     )
     print(f"Saved {csv_path}")
@@ -1748,6 +2006,41 @@ def build_parser() -> argparse.ArgumentParser:
     compare_readouts.add_argument("--data-output", default=None)
     compare_readouts.set_defaults(handler=run_readout_comparison)
 
+    handoff_selection = subparsers.add_parser(
+        "study-handoff-selection",
+        help=(
+            "Predict mean/variance/covariance truncation error for handoff choices "
+            "and optionally validate them with stochastic ensembles."
+        ),
+    )
+    _add_shared_arguments(handoff_selection)
+    _add_covariance_arguments(handoff_selection)
+    handoff_selection.add_argument("--initial-modes", type=int, default=None)
+    handoff_selection.add_argument(
+        "--final-modes",
+        type=int,
+        nargs="+",
+        default=[20, 35, 50, 75],
+    )
+    handoff_selection.add_argument(
+        "--handoff-times",
+        type=float,
+        nargs="+",
+        default=[1.0, 5.0, 10.0, 20.0, 50.0],
+    )
+    handoff_selection.add_argument("--mean-tolerance", type=float, default=0.005)
+    handoff_selection.add_argument("--variance-tolerance", type=float, default=0.25)
+    handoff_selection.add_argument("--covariance-tolerance", type=float, default=0.30)
+    handoff_selection.add_argument(
+        "--output",
+        default="outputs/handoff_selection/prediction_validation.png",
+    )
+    handoff_selection.add_argument(
+        "--csv-output",
+        default="outputs/handoff_selection/prediction_validation.csv",
+    )
+    handoff_selection.set_defaults(handler=run_handoff_selection_study)
+
     handoff_sweep = subparsers.add_parser(
         "sweep-handoff",
         help="Sweep full-to-reduced handoff times and final correlated mode counts.",
@@ -1811,7 +2104,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=[0, 5, 10, 20, 51],
         help="Use rank 0 for the raw handoff baseline.",
     )
+    completion_sweep.add_argument(
+        "--completion-readouts",
+        nargs="+",
+        choices=(
+            "unresolved_gaussian_completion",
+            "persistent_unresolved_completion",
+            "unresolved_gaussian_completion_simplex_bank",
+            "persistent_unresolved_completion_simplex_bank",
+        ),
+        default=[
+            "unresolved_gaussian_completion",
+            "persistent_unresolved_completion",
+            "unresolved_gaussian_completion_simplex_bank",
+            "persistent_unresolved_completion_simplex_bank",
+        ],
+    )
     completion_sweep.add_argument("--completion-ridge", type=float, default=1.0e-2)
+    completion_sweep.add_argument(
+        "--temporal-lag",
+        type=float,
+        default=1.0,
+        help="Lag used for the cross-time covariance error.",
+    )
     completion_sweep.add_argument(
         "--output",
         default="outputs/unresolved_completion/completion_rank_sweep.png",

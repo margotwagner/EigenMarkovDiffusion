@@ -57,3 +57,9 @@ def test_completion_rank_sweep_parser() -> None:
     )
     assert args.modes == 10
     assert args.completion_ranks == [0, 5, 11]
+
+
+def test_completion_rank_sweep_includes_persistent_and_constrained_readouts() -> None:
+    args = build_parser().parse_args(["sweep-completion-rank"])
+    assert "persistent_unresolved_completion" in args.completion_readouts
+    assert "persistent_unresolved_completion_simplex_bank" in args.completion_readouts

@@ -9,7 +9,7 @@ Laplacian eigenbasis instead of by explicitly tracking particles. The project
 has progressed from the original independent-mode formulation to correlated
 modal dynamics, physically constrained banking, adaptive modal reduction, and
 Gaussian readouts for reconstructing unresolved modes. The package, command
-line workflows, analytic references, diagnostics, and 73 tests are complete and
+line workflows, analytic references, diagnostics, and 79 tests are complete and
 passing. A five-part presentation experiment suite was completed in July 2026.
 
 The main scientific conclusion is that mean propagation is no longer the core
@@ -26,7 +26,7 @@ faster than the aggregated multinomial baseline.
 The tracked code is at commit `7834f7d` (`cleaned up repo after telluride
 hackathon`). The canonical presentation outputs are present in
 `outputs/presentation/`. The script `run_presentation_results.sh` defines that
-pipeline but is currently untracked. All 73 automated tests pass.
+pipeline but is currently untracked. All 79 automated tests pass.
 
 Time-resolved errors, bootstrap uncertainty, and a 5,000-trial convergence
 study are now complete. The next phase should focus on an error-based
@@ -66,6 +66,8 @@ wall-clock measurement and is not an ensemble trial.
 | 4. Temporal-correlation comparison | Multinomial reference, full correlated, raw 101-to-50 handoff, independent completion, and persistent completion; lags 1, 2, 5, 10, 20 | 101 initial modes; 50 retained; handoff/completion at step 10; completion rank 10; 500 trials; seed 3 | Test whether fluctuations persist correctly through time. Same-time mean and covariance alone cannot distinguish independent redraws from a dynamically consistent unresolved process. |
 | 5. End-to-end performance | Multinomial, full correlated, raw handoff, independent completion, and persistent completion | Node sweep 31/51/101/151 with full ranks 31/51/101/151 and reduced ranks 16/26/50/76; particle sweep 1,000/5,275/10,000 at 101-to-50 modes; 5 timing repeats; seed 4 | Measure setup time, trajectory time, amortized time, and resident NumPy-array storage. Determine whether modal reduction creates an actual computational benefit rather than only reducing the nominal modal state. |
 | 6. Trial-count convergence | Multinomial reference; independent, correlated, and banked correlated modal models | 101 modes; nested prefixes of 100, 250, 500, 1,000, 2,000, and 5,000 trials; 200 block-bootstrap resamples; seed 20 | Separate finite-ensemble noise from structural model error, quantify uncertainty, and make the independent model's sampled-mean error directly visible. |
+| 7. Predictive handoff selection | Analytic modal-energy predictor validated against correlated handoff ensembles | 35, 50, 60, 75 retained modes; handoff steps 10, 15, 20, 30; 16 held-out configurations; 250 trials each | Predict post-handoff mean, variance, and covariance loss before running an ensemble and identify the accuracy/work Pareto frontier. |
+| 8. Completion and physical-output selection | Independent/persistent completion, with and without simplex banking | Completion-rank sweeps plus 500-trial headline checks at 35/50/75 modes | Select completion rank for compute/balanced/accuracy operating points and test whether nonnegativity and mass conservation distort stochastic moments. |
 
 The presentation suite did not include the earlier recommended completion-rank
 sweep (`0, 5, 10, 20, 30, 51`). That remains part of the next experiment cycle;
@@ -112,55 +114,49 @@ the run-count convergence study has now been completed separately.
 
 ## Completed follow-up
 
-The first two recommendations from the November review are complete. Model
+The first four recommendations from the November review are complete. Model
 figures now show log-scale, time-resolved mean-profile error rather than only
 overlaid mean curves. Aggregate, maximum-time, and final-time mean/variance
 errors are saved with bootstrap uncertainty intervals. The nested convergence
 study reached 5,000 trials for all four core methods and shows that the
 independent variance/covariance errors plateau while the other methods continue
-to converge with the multinomial sampling floor.
+to converge with the multinomial sampling floor. The handoff predictor achieved
+correlations of 0.999/0.9995/0.998 for mean/variance/covariance on 16 held-out
+configurations. Persistent completion followed by a simplex bank now produces
+nonnegative, exactly mass-conserving outputs without materially changing the
+recovered moments.
+
+Three 500-trial completed operating points are retained: compute-first
+(35 modes, handoff 20, completion rank 20), balanced (50, 10, rank 10), and
+accuracy-first (75, 30, rank 5). Their mean/variance/covariance errors are all
+near the appropriate ensemble sampling floor. The compute-first point uses
+47.7% of full modal updates, versus 54.6% for balanced and 82.0% for
+accuracy-first.
 
 ## Ordered next steps
 
-### 1. Replace empirical handoff selection with a predictive error rule
+### 1. Benchmark the three selected completed operating points
 
-For every candidate retained rank `M` and handoff time `t`, compute the exact
-omitted deterministic energy and omitted covariance energy before running an
-ensemble. Select the earliest/lowest-cost pair satisfying tolerances such as
+Measure setup time, per-trajectory time, amortized time, retained arrays, and
+peak RSS for the exact 35/20/rank-20, 50/10/rank-10, and 75/30/rank-5
+pipelines. Modal-update fraction omits the dense completion oracle, so this
+benchmark is required before choosing the default reduced pipeline.
 
-```text
-||mu(t) - Pi_M mu(t)||_2 / ||mu(t)||_2 <= epsilon_mean
-||C(t) - Pi_M C(t) Pi_M||_F / ||C(t)||_F <= epsilon_cov
-```
-
-Validate those predictions against held-out stochastic runs and build an
-error-versus-cost Pareto frontier. Include the later-time accumulated error,
-not only the instantaneous projection error. The existing 20-point handoff
-sweep provides training/validation data but is not yet a general rule.
-
-### 2. Complete the rank/readout study and enforce physical outputs
-
-Run completion ranks 0, 5, 10, 20, 30, and 51 at the selected handoff settings.
-Then combine persistent completion with a nonnegative, mass-conserving output
-map and quantify how much it changes mean, variance, same-time covariance, and
-cross-time covariance. The goal is a reduced output that is statistically
-accurate and physically admissible, not merely one of those properties.
-
-### 3. Add distribution-level error metrics
+### 2. Add distribution-level error metrics
 
 Add one-dimensional Wasserstein or total-variation distance for selected
 node-count marginals and a sliced Wasserstein or energy distance for spatial
 vectors. KL divergence should not be the primary metric because Gaussian modal
 outputs and discrete multinomial counts do not share the same support.
 
-### 4. Replace the analytic oracle closure
+### 3. Replace the analytic oracle closure
 
 Develop a structured, sparse, local, or learned unresolved process that retains
 the persistent model's temporal accuracy without dense time-indexed conditional
 gains. Train/fit on one set of particle simulations and validate on held-out
 initial conditions, particle counts, domains, and diffusivities.
 
-### 5. Optimize and scale after the scientific target is fixed
+### 4. Optimize and scale after the scientific target is fixed
 
 Scaling is important, but it should not be the next standalone activity. First
 remove full-grid noise construction from the reduced path and reduce completion
@@ -366,10 +362,20 @@ presentation run). Experiment 4 tests cross-time covariance and lag correlation
 at lags 1, 2, 5, 10, and 20. The method remains an analytic Gaussian oracle and
 does not guarantee integer or nonnegative counts.
 
-## C5. Relationship to future physical readouts
+## C5. Persistent completion with a physical simplex readout
 
-The current comparison separates two goals: Gaussian completion restores
-missing statistics, while simplex banking restores physical bounds. The next
-readout experiment should compose persistent completion with a constrained
-map, then measure whether the constraint correction preserves mean, same-time
-covariance, and cross-time covariance within declared tolerances.
+The completed physical readout composes persistent Gaussian completion with
+the temporal simplex bank. If `n_complete,t` is the completed field and
+`e_(t-1)` is the constraint ledger,
+
+```text
+z_t = n_complete,t + e_(t-1)
+n_physical,t = project_to_simplex(z_t, N)
+e_t = z_t - n_physical,t.
+```
+
+This guarantees nonnegative output and exact mass conservation. The Gaussian
+completion magnitude and simplex constraint ledger are recorded separately.
+Across the selected 500-trial operating points, the constraint eliminated all
+negative mass while changing mean, same-time covariance, and cross-time
+covariance errors only minimally.

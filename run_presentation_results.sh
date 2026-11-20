@@ -15,7 +15,7 @@ set -euo pipefail
 
 mkdir -p outputs/presentation
 
-echo "1/6 Comparing the core modal models..."
+echo "1/8 Comparing the core modal models..."
 python -m eigendiffusion compare-modal-models \
   --models independent_modal correlated_modal banked_correlated_modal \
   --particles 5275 \
@@ -32,7 +32,7 @@ python -m eigendiffusion compare-modal-models \
   --csv-output outputs/presentation/01_modal_models.csv \
   --data-output outputs/presentation/01_modal_models.npz
 
-echo "2/6 Comparing reduced-model readouts and completion..."
+echo "2/8 Comparing reduced-model readouts and completion..."
 python -m eigendiffusion compare-readouts \
   --modal-model handoff_correlated_modal \
   --initial-modes 101 \
@@ -54,7 +54,7 @@ python -m eigendiffusion compare-readouts \
   --csv-output outputs/presentation/02_readouts.csv \
   --data-output outputs/presentation/02_readouts.npz
 
-echo "3/6 Sweeping handoff time and reduced mode count..."
+echo "3/8 Sweeping handoff time and reduced mode count..."
 python -m eigendiffusion sweep-handoff \
   --initial-modes 101 \
   --final-modes 20 35 50 75 \
@@ -70,7 +70,7 @@ python -m eigendiffusion sweep-handoff \
   --output outputs/presentation/03_handoff_sweep.png \
   --csv-output outputs/presentation/03_handoff_sweep.csv
 
-echo "4/6 Comparing temporal correlations..."
+echo "4/8 Comparing temporal correlations..."
 python -m eigendiffusion compare-temporal-correlation \
   --initial-modes 101 \
   --handoff-time 10 \
@@ -93,7 +93,7 @@ python -m eigendiffusion compare-temporal-correlation \
   --csv-output outputs/presentation/04_temporal_correlation.csv \
   --data-output outputs/presentation/04_temporal_correlation.npz
 
-echo "5/6 Benchmarking model performance..."
+echo "5/8 Benchmarking model performance..."
 python -m eigendiffusion benchmark-models \
   --methods multinomial_random_walk full_correlated_modal handoff_raw handoff_independent_completion handoff_persistent_completion \
   --node-counts 31 51 101 151 \
@@ -109,7 +109,7 @@ python -m eigendiffusion benchmark-models \
   --output outputs/presentation/05_performance.png \
   --csv-output outputs/presentation/05_performance.csv
 
-echo "6/6 Measuring trial-count convergence..."
+echo "6/8 Measuring trial-count convergence..."
 python -m eigendiffusion study-trial-convergence \
   --models independent_modal correlated_modal banked_correlated_modal \
   --particles 5275 \
@@ -126,5 +126,43 @@ python -m eigendiffusion study-trial-convergence \
   --output outputs/presentation/06_trial_convergence.png \
   --csv-output outputs/presentation/06_trial_convergence.csv \
   --data-output outputs/presentation/06_trial_convergence.npz
+
+echo "7/8 Validating predictive handoff selection..."
+python -m eigendiffusion study-handoff-selection \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --initial-modes 101 \
+  --final-modes 35 50 60 75 \
+  --handoff-times 10 15 20 30 \
+  --runs 250 \
+  --covariance-times 1 5 20 50 100 \
+  --mean-tolerance 0.005 \
+  --variance-tolerance 0.25 \
+  --covariance-tolerance 0.30 \
+  --seed 30 \
+  --output outputs/presentation/07_handoff_selection.png \
+  --csv-output outputs/presentation/07_handoff_selection.csv
+
+echo "8/8 Sweeping completion rank and physical constraints..."
+python -m eigendiffusion sweep-completion-rank \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --initial-modes 101 \
+  --modes 50 \
+  --handoff-time 10 \
+  --completion-start-time 10 \
+  --completion-ranks 0 5 10 20 30 51 \
+  --completion-readouts unresolved_gaussian_completion persistent_unresolved_completion unresolved_gaussian_completion_simplex_bank persistent_unresolved_completion_simplex_bank \
+  --completion-ridge 0.01 \
+  --temporal-lag 1 \
+  --runs 500 \
+  --covariance-times 1 5 10 20 50 100 \
+  --seed 40 \
+  --output outputs/presentation/08_completion_selection.png \
+  --csv-output outputs/presentation/08_completion_selection.csv
 
 echo "Presentation results are ready in outputs/presentation/."

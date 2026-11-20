@@ -58,6 +58,8 @@ ReadoutName = Literal[
     "delta_sigma_neighbor",
     "unresolved_gaussian_completion",
     "persistent_unresolved_completion",
+    "unresolved_gaussian_completion_simplex_bank",
+    "persistent_unresolved_completion_simplex_bank",
 ]
 READOUT_NAMES: tuple[ReadoutName, ...] = (
     "raw",
@@ -66,6 +68,8 @@ READOUT_NAMES: tuple[ReadoutName, ...] = (
     "delta_sigma_neighbor",
     "unresolved_gaussian_completion",
     "persistent_unresolved_completion",
+    "unresolved_gaussian_completion_simplex_bank",
+    "persistent_unresolved_completion_simplex_bank",
 )
 
 
@@ -416,6 +420,34 @@ def apply_readout(
             completion_rank=completion_rank,
             completion_ridge=completion_ridge,
             rng=rng,
+        )
+    if readout in {
+        "unresolved_gaussian_completion_simplex_bank",
+        "persistent_unresolved_completion_simplex_bank",
+    }:
+        if config is None or retained_modes is None:
+            raise ValueError(f"{readout} requires config and retained_modes")
+        completion = (
+            unresolved_gaussian_completion_readout
+            if readout.startswith("unresolved_")
+            else persistent_unresolved_completion_readout
+        )
+        completed = completion(
+            raw_counts,
+            total_mass,
+            config=config,
+            retained_modes=retained_modes,
+            completion_start_time=completion_start_time,
+            completion_rank=completion_rank,
+            completion_ridge=completion_ridge,
+            rng=rng,
+        )
+        constrained = simplex_bank_readout(completed.counts, total_mass)
+        return ReadoutResult(
+            counts=constrained.counts,
+            residuals=constrained.residuals,
+            adjusted_inputs=completed.counts,
+            readout_name=readout,
         )
     allowed = ", ".join(READOUT_NAMES)
     raise ValueError(f"unknown readout {readout!r}; choose one of: {allowed}")

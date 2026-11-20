@@ -27,6 +27,12 @@ def _display_name(model_name: str) -> str:
         "delta_sigma_neighbor": "neighbor ΔΣ readout",
         "unresolved_gaussian_completion": "unresolved Gaussian completion",
         "persistent_unresolved_completion": "persistent unresolved completion",
+        "unresolved_gaussian_completion_simplex_bank": (
+            "unresolved completion + simplex bank"
+        ),
+        "persistent_unresolved_completion_simplex_bank": (
+            "persistent completion + simplex bank"
+        ),
         "multinomial_random_walk": "multinomial random walk",
         "full_correlated_modal": "full correlated modal",
         "handoff_raw": "101→reduced handoff + raw",
@@ -451,6 +457,133 @@ def plot_handoff_sweep(
     return output
 
 
+def plot_handoff_selection(
+    rows: list[dict[str, float | int | str | bool | None]],
+    final_modes: list[int],
+    handoff_times: list[float],
+    output_path: str | Path,
+) -> Path:
+    """Plot analytic handoff predictions and optional validation results."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    by_pair = {
+        (float(row["requested_handoff_time"]), int(row["final_n_modes"])): row
+        for row in rows
+    }
+    mean_grid = np.asarray(
+        [
+            [
+                float(by_pair[(time, mode)]["predicted_mean_relative_l2_error"])
+                for mode in final_modes
+            ]
+            for time in handoff_times
+        ]
+    )
+    covariance_grid = np.asarray(
+        [
+            [
+                float(
+                    by_pair[(time, mode)][
+                        "predicted_covariance_relative_frobenius_error"
+                    ]
+                )
+                for mode in final_modes
+            ]
+            for time in handoff_times
+        ]
+    )
+    work_grid = np.asarray(
+        [
+            [
+                float(by_pair[(time, mode)]["modal_update_fraction_of_full"])
+                for mode in final_modes
+            ]
+            for time in handoff_times
+        ]
+    )
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
+    grids = (
+        (mean_grid, "Predicted mean truncation error"),
+        (covariance_grid, "Predicted covariance truncation error"),
+        (work_grid, "Modal-update work fraction"),
+    )
+    for ax, (grid, title) in zip(axes.ravel()[:3], grids, strict=True):
+        image = ax.imshow(grid, origin="lower", aspect="auto", cmap="viridis")
+        ax.set_xticks(range(len(final_modes)), final_modes)
+        ax.set_yticks(range(len(handoff_times)), [f"{value:g}" for value in handoff_times])
+        ax.set_xlabel("retained modes")
+        ax.set_ylabel("handoff time (µs)")
+        ax.set_title(title)
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+
+    ax = axes[1, 1]
+    validated = [
+        row
+        for row in rows
+        if row.get("observed_covariance_relative_frobenius_error") is not None
+    ]
+    if validated:
+        specs = (
+            (
+                "predicted_mean_with_sampling_error",
+                "observed_mean_relative_l2_error",
+                "mean",
+            ),
+            (
+                "predicted_variance_with_sampling_error",
+                "observed_variance_relative_l2_error",
+                "variance",
+            ),
+            (
+                "predicted_covariance_with_sampling_error",
+                "observed_covariance_relative_frobenius_error",
+                "covariance",
+            ),
+        )
+        all_values: list[float] = []
+        for predicted_key, observed_key, label in specs:
+            predicted = np.asarray([float(row[predicted_key]) for row in validated])
+            observed = np.asarray([float(row[observed_key]) for row in validated])
+            ax.scatter(predicted, observed, label=label, alpha=0.8)
+            all_values.extend(predicted.tolist())
+            all_values.extend(observed.tolist())
+        positive = np.asarray([value for value in all_values if value > 0.0])
+        lower = float(np.min(positive)) * 0.8
+        upper = float(np.max(positive)) * 1.2
+        ax.plot([lower, upper], [lower, upper], "--", color="black", linewidth=1)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("analytic prediction + sampling floor")
+        ax.set_ylabel("observed ensemble error")
+        ax.set_title("Held-out validation")
+        ax.legend(fontsize=8)
+    else:
+        frontier = [row for row in rows if bool(row.get("pareto_optimal"))]
+        ax.scatter(
+            [float(row["modal_update_fraction_of_full"]) for row in rows],
+            [float(row["predicted_covariance_relative_frobenius_error"]) for row in rows],
+            alpha=0.45,
+            label="candidates",
+        )
+        ax.scatter(
+            [float(row["modal_update_fraction_of_full"]) for row in frontier],
+            [float(row["predicted_covariance_relative_frobenius_error"]) for row in frontier],
+            label="Pareto frontier",
+        )
+        ax.set_xlabel("modal-update work fraction")
+        ax.set_ylabel("predicted covariance error")
+        ax.set_title("Accuracy/work frontier")
+        ax.legend(fontsize=8)
+
+    fig.suptitle("Predictive handoff selection", y=1.01)
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output
+
+
 def plot_random_walk_benchmark(
     records,
     output_path: str | Path,
@@ -496,43 +629,64 @@ def plot_random_walk_benchmark(
 
 
 def plot_completion_rank_sweep(
-    ranks: list[int],
-    mean_errors: list[float],
-    variance_errors: list[float],
-    covariance_errors: list[float],
-    negative_mass_fractions: list[float],
-    completion_l1_fractions: list[float],
+    rows: list[dict[str, float | int | str | None]],
     output_path: str | Path,
 ) -> Path:
-    """Plot accuracy and physicality against stochastic completion rank."""
+    """Plot completion accuracy, persistence, and physicality by rank."""
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8.0))
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8.0))
+    readouts = []
+    for row in rows:
+        name = str(row["readout"])
+        if name != "raw" and name not in readouts:
+            readouts.append(name)
 
-    axes[0, 0].plot(ranks, mean_errors, marker="o")
-    axes[0, 0].set_title("Mean relative error")
-    axes[0, 0].set_xlabel("completion rank (0 = raw)")
-    axes[0, 0].set_ylabel("relative L2 error")
-
-    axes[0, 1].plot(ranks, variance_errors, marker="o", label="variance")
-    axes[0, 1].plot(ranks, covariance_errors, marker="o", label="covariance")
-    axes[0, 1].set_title("Stochastic moment error")
-    axes[0, 1].set_xlabel("completion rank (0 = raw)")
-    axes[0, 1].set_ylabel("relative error")
-    axes[0, 1].legend()
-
-    axes[1, 0].plot(ranks, negative_mass_fractions, marker="o")
-    axes[1, 0].set_title("Negative reconstructed mass")
-    axes[1, 0].set_xlabel("completion rank (0 = raw)")
-    axes[1, 0].set_ylabel("mean negative mass fraction")
-
-    axes[1, 1].plot(ranks, completion_l1_fractions, marker="o")
-    axes[1, 1].set_title("Added unresolved field")
-    axes[1, 1].set_xlabel("completion rank (0 = raw)")
-    axes[1, 1].set_ylabel("mean L1 addition / total mass")
-
-    fig.suptitle("Unresolved Gaussian completion rank sweep", y=1.01)
+    panels = (
+        ("mean_relative_l2_error", "Mean error", "relative L2 error"),
+        ("variance_relative_l2_error", "Variance error", "relative L2 error"),
+        (
+            "covariance_relative_frobenius_error",
+            "Same-time covariance error",
+            "relative Frobenius error",
+        ),
+        (
+            "cross_time_covariance_relative_frobenius_error",
+            "Cross-time covariance error",
+            "relative Frobenius error",
+        ),
+        (
+            "mean_negative_mass_fraction",
+            "Negative mass",
+            "mean negative mass / total",
+        ),
+        (
+            "mean_constraint_residual_l1_fraction",
+            "Constraint residual",
+            "mean residual L1 / total",
+        ),
+    )
+    raw = next(row for row in rows if str(row["readout"]) == "raw")
+    for ax, (metric, title, ylabel) in zip(axes.ravel(), panels, strict=True):
+        for readout in readouts:
+            selected = sorted(
+                (row for row in rows if str(row["readout"]) == readout),
+                key=lambda row: int(row["completion_rank"]),
+            )
+            ranks = [0] + [int(row["completion_rank"]) for row in selected]
+            raw_value = raw.get(metric)
+            values = [0.0 if raw_value is None else float(raw_value)] + [
+                0.0 if row.get(metric) is None else float(row[metric])
+                for row in selected
+            ]
+            ax.plot(ranks, values, marker="o", label=_display_name(readout))
+        ax.set_title(title)
+        ax.set_xlabel("completion rank (0 = raw)")
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.2)
+    axes[0, 0].legend(fontsize=7)
+    fig.suptitle("Completion rank, temporal persistence, and physical constraints", y=1.01)
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)

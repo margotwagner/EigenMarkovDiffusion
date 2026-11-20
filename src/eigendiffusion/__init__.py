@@ -57,6 +57,7 @@ from .ensemble import (
     run_naive_random_walk_ensemble,
     run_random_walk_ensemble,
 )
+from .handoff import HandoffPrediction, pareto_handoff_indices, predict_handoff_grid
 from .metrics import (
     EnsembleDiagnostics,
     ValidationMetrics,
@@ -109,6 +110,7 @@ __all__ = [
     "PersistentUnresolvedGaussianCompleter",
     "HandoffCorrelatedModalDiffusion",
     "HandoffCorrelatedModalResult",
+    "HandoffPrediction",
     "DiffusionConfig",
     "DiffusionMethodBenchmark",
     "EigenMarkovDiffusion",
@@ -154,6 +156,8 @@ __all__ = [
     "naive_random_walk_diffusion",
     "naive_random_walk_trajectories",
     "project_to_mass_simplex",
+    "pareto_handoff_indices",
+    "predict_handoff_grid",
     "random_walk_diffusion",
     "random_walk_transition_matrix",
     "relative_l2_error_from_time",
