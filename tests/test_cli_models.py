@@ -21,3 +21,13 @@ def test_compare_defaults_to_all_three_modal_models():
         "correlated_modal",
         "banked_correlated_modal",
     ]
+
+
+def test_trial_convergence_defaults_reach_five_thousand_trials():
+    args = build_parser().parse_args(["study-trial-convergence"])
+    assert args.trial_counts == [100, 250, 500, 1_000, 2_000, 5_000]
+    assert args.models == [
+        "independent_modal",
+        "correlated_modal",
+        "banked_correlated_modal",
+    ]

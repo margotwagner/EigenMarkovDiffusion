@@ -113,6 +113,7 @@ The available workflows are:
 | `validate` | Compare one modal model with analytic and random-walk references |
 | `sweep-modes` | Measure sensitivity to the number of retained modes |
 | `compare-modal-models` | Compare independent, correlated, and banked models |
+| `study-trial-convergence` | Measure error convergence from 100–5,000 trials with bootstrap intervals |
 | `compare-readouts` | Apply several readouts to the same modal ensemble |
 | `sweep-handoff` | Sweep handoff times and reduced mode counts |
 | `sweep-completion-rank` | Sweep unresolved Gaussian completion rank |
@@ -137,6 +138,28 @@ python -m eigendiffusion compare-modal-models \
 
 Generated results belong under `outputs/`, which is ignored by Git except for
 the placeholder that keeps the directory present.
+
+To reproduce the high-trial-count convergence study:
+
+```bash
+python -m eigendiffusion study-trial-convergence \
+  --models independent_modal correlated_modal banked_correlated_modal \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --modes 101 \
+  --trial-counts 100 250 500 1000 2000 5000 \
+  --bootstrap-resamples 200 \
+  --covariance-times 1 5 20 50 100 \
+  --output outputs/convergence/core_models_r5000.png \
+  --csv-output outputs/convergence/core_models_r5000.csv
+```
+
+The comparison figure shows time-resolved relative mean-profile error rather
+than nearly overlapping mean curves. CSV diagnostics additionally include the
+maximum and final-time mean/variance errors and the sampled mean error relative
+to the multinomial reference's expected Monte Carlo standard error.
 
 ## Repository layout
 

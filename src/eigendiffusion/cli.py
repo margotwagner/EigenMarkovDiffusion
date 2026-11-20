@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 from pathlib import Path
 
@@ -26,10 +27,12 @@ from .ensemble import (
     run_random_walk_ensemble,
 )
 from .metrics import (
+    bootstrap_error_intervals,
     relative_frobenius_error,
     relative_l2_error,
     relative_l2_error_from_time,
     summarize_ensemble,
+    time_resolved_relative_l2_error,
 )
 from .plotting import (
     plot_diffusion_method_benchmark,
@@ -39,6 +42,7 @@ from .plotting import (
     plot_model_comparison,
     plot_random_walk_benchmark,
     plot_temporal_correlation_comparison,
+    plot_trial_convergence,
     plot_validation,
 )
 from .readouts import READOUT_NAMES, ReadoutName, readout_constraint_diagnostics
@@ -57,7 +61,11 @@ from .temporal import (
 )
 
 
-def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_shared_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_runs: bool = True,
+) -> None:
     parser.add_argument("--particles", type=int, default=5_275)
     parser.add_argument("--nodes", type=int, default=101)
     parser.add_argument("--steps", type=int, default=101)
@@ -65,7 +73,8 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dt", type=float, default=1.0)
     parser.add_argument("--length", type=float, default=4.0)
     parser.add_argument("--diffusion", type=float, default=2.20e-4)
-    parser.add_argument("--runs", type=int, default=100)
+    if include_runs:
+        parser.add_argument("--runs", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--modal-particle-weight",
@@ -661,6 +670,154 @@ def run_model_comparison(args: argparse.Namespace) -> int:
             "covariance_times": covariance_times,
         },
         "diagnostics": diagnostics,
+        "figure": str(figure),
+        "csv": str(csv_path),
+        "data": str(data_path),
+    }
+    print(json.dumps(report, indent=2))
+    return 0
+
+
+def run_trial_convergence(args: argparse.Namespace) -> int:
+    """Measure ensemble-metric convergence from nested trajectory prefixes."""
+
+    config = _config_from_args(args)
+    n_modes = config.n_nodes if args.modes is None else args.modes
+    trial_counts = sorted(set(args.trial_counts))
+    if not trial_counts or trial_counts[0] < 2:
+        raise ValueError("trial counts must contain integers of at least 2")
+    maximum_trials = trial_counts[-1]
+
+    discrete_reference = discrete_expected_diffusion(config)
+    analytic_variance = multinomial_marginal_variance(config)
+    analytic_covariance = multinomial_marginal_covariance(config)
+    covariance_indices, covariance_times = _nearest_time_indices(
+        config.times,
+        args.covariance_times,
+        exclude_zero=True,
+    )
+
+    csv_path = Path(args.csv_output)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, float | int | str | None]] = []
+    full_mean_errors: dict[str, np.ndarray] = {}
+
+    method_names = [f"random_walk_{args.random_walk_method}", *args.models]
+
+    def write_rows() -> None:
+        if not rows:
+            return
+        fieldnames: list[str] = []
+        for row in rows:
+            for key in row:
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    for method_index, method_name in enumerate(method_names):
+        print(
+            f"Simulating {method_name}: {maximum_trials} trials...",
+            flush=True,
+        )
+        if method_name.startswith("random_walk_"):
+            ensemble = run_random_walk_ensemble(
+                config,
+                n_runs=maximum_trials,
+                seed=args.seed,
+                method=args.random_walk_method,
+            )
+        else:
+            ensemble = run_modal_ensemble(
+                config,
+                n_runs=maximum_trials,
+                model=method_name,
+                n_modes=n_modes,
+                modal_particle_weight=args.modal_particle_weight,
+                initialization=args.initialization,
+                initial_n_modes=args.initial_modes,
+                handoff_time=args.handoff_time,
+                seed=args.seed + method_index,
+            )
+
+        full_mean_errors[method_name] = time_resolved_relative_l2_error(
+            discrete_reference,
+            ensemble.runs.mean(axis=0),
+        )
+        for count_index, trial_count in enumerate(trial_counts):
+            prefix = ensemble.runs[:trial_count]
+            diagnostics = summarize_ensemble(
+                discrete_reference,
+                analytic_variance,
+                prefix,
+                config.n_particles,
+                reference_covariance=analytic_covariance,
+                covariance_time_indices=covariance_indices,
+            ).as_dict()
+            intervals = bootstrap_error_intervals(
+                discrete_reference,
+                analytic_variance,
+                prefix,
+                reference_covariance=analytic_covariance,
+                covariance_time_indices=covariance_indices,
+                n_resamples=args.bootstrap_resamples,
+                confidence_level=args.confidence_level,
+                n_blocks=args.bootstrap_blocks,
+                seed=args.seed + 10_000 * method_index + count_index,
+            )
+            row: dict[str, float | int | str | None] = {
+                "model": method_name,
+                "trial_count": trial_count,
+                **diagnostics,
+            }
+            for metric, (lower, upper) in intervals.items():
+                row[f"{metric}_ci_lower"] = lower
+                row[f"{metric}_ci_upper"] = upper
+            rows.append(row)
+            print(
+                f"  n={trial_count}: "
+                f"mean={diagnostics['mean_relative_l2_error']:.6g}, "
+                f"variance={diagnostics['variance_relative_l2_error']:.6g}, "
+                f"covariance={diagnostics['covariance_relative_frobenius_error']:.6g}",
+                flush=True,
+            )
+
+        write_rows()
+        del ensemble
+        gc.collect()
+
+    figure = plot_trial_convergence(
+        rows=rows,
+        times=config.times,
+        mean_error_by_time=full_mean_errors,
+        output_path=args.output,
+    )
+    data_path = Path(args.data_output) if args.data_output else figure.with_suffix(".npz")
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    save_items: dict[str, object] = {
+        "times": config.times,
+        "trial_counts": np.asarray(trial_counts, dtype=int),
+        "covariance_time_indices": np.asarray(covariance_indices, dtype=int),
+        "covariance_times": np.asarray(covariance_times, dtype=float),
+    }
+    for name, values in full_mean_errors.items():
+        save_items[f"mean_relative_l2_by_time_{name}"] = values
+    np.savez_compressed(data_path, **save_items)
+
+    report = {
+        "configuration": {
+            "particles": config.n_particles,
+            "nodes": config.n_nodes,
+            "steps": config.n_steps,
+            "modes": n_modes,
+            "trial_counts": trial_counts,
+            "models": method_names,
+            "bootstrap_resamples": args.bootstrap_resamples,
+            "confidence_level": args.confidence_level,
+            "covariance_times": covariance_times,
+        },
         "figure": str(figure),
         "csv": str(csv_path),
         "data": str(data_path),
@@ -1497,6 +1654,56 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--csv-output", default="outputs/modal_model_comparison.csv")
     compare.add_argument("--data-output", default=None)
     compare.set_defaults(handler=run_model_comparison)
+
+    convergence = subparsers.add_parser(
+        "study-trial-convergence",
+        help=(
+            "Measure how mean, variance, and covariance errors converge as the "
+            "number of stochastic trials increases."
+        ),
+    )
+    _add_shared_arguments(convergence, include_runs=False)
+    _add_handoff_arguments(convergence)
+    _add_covariance_arguments(convergence)
+    convergence.add_argument(
+        "--models",
+        nargs="+",
+        choices=MODAL_MODEL_NAMES,
+        default=[
+            "independent_modal",
+            "correlated_modal",
+            "banked_correlated_modal",
+        ],
+    )
+    convergence.add_argument("--modes", type=int, default=None)
+    convergence.add_argument(
+        "--random-walk-method",
+        choices=("naive", "multinomial"),
+        default="multinomial",
+    )
+    convergence.add_argument(
+        "--trial-counts",
+        type=int,
+        nargs="+",
+        default=[100, 250, 500, 1_000, 2_000, 5_000],
+        help=(
+            "Nested ensemble sizes. Each method is simulated only at the maximum "
+            "count and smaller counts use deterministic prefixes."
+        ),
+    )
+    convergence.add_argument("--bootstrap-resamples", type=int, default=200)
+    convergence.add_argument("--bootstrap-blocks", type=int, default=20)
+    convergence.add_argument("--confidence-level", type=float, default=0.95)
+    convergence.add_argument(
+        "--output",
+        default="outputs/convergence/trial_convergence.png",
+    )
+    convergence.add_argument(
+        "--csv-output",
+        default="outputs/convergence/trial_convergence.csv",
+    )
+    convergence.add_argument("--data-output", default=None)
+    convergence.set_defaults(handler=run_trial_convergence)
 
     compare_readouts = subparsers.add_parser(
         "compare-readouts",

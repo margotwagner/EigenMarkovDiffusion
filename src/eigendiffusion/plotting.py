@@ -202,22 +202,24 @@ def plot_model_comparison(
 
     t = config.times
     x = config.positions
-    impulse = config.impulse_index
     fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
 
     ax = axes[0, 0]
-    ax.plot(
-        t,
-        discrete_reference[:, impulse],
-        "--",
-        linewidth=2.2,
-        label="discrete expected mean",
-    )
     for name, runs in model_runs.items():
-        ax.plot(t, runs.mean(axis=0)[:, impulse], label=_display_name(name), linewidth=1.7)
-    ax.set_title("Impulse-node mean")
+        observed_mean = runs.mean(axis=0)
+        numerator = np.linalg.norm(observed_mean - discrete_reference, axis=1)
+        denominator = np.linalg.norm(discrete_reference, axis=1)
+        error = np.divide(
+            numerator,
+            denominator,
+            out=np.full_like(numerator, np.nan),
+            where=denominator > 0.0,
+        )
+        ax.plot(t, error, label=_display_name(name), linewidth=1.7)
+    ax.set_title("Mean-profile error by time")
     ax.set_xlabel("time (µs)")
-    ax.set_ylabel("particle count")
+    ax.set_ylabel("relative L2 mean error")
+    ax.set_yscale("log")
     ax.legend(fontsize=8)
 
     ax = axes[0, 1]
@@ -265,6 +267,76 @@ def plot_model_comparison(
     ax.set_yscale("log")
     ax.legend(fontsize=8)
 
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output
+
+
+def plot_trial_convergence(
+    rows: list[dict[str, float | int | str | None]],
+    times: FloatArray,
+    mean_error_by_time: dict[str, FloatArray],
+    output_path: str | Path,
+) -> Path:
+    """Plot moment-error convergence and expose time-resolved mean bias."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    model_names = list(mean_error_by_time)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
+    metric_specs = (
+        ("mean_relative_l2_error", "Mean error convergence", "relative L2 mean error"),
+        (
+            "variance_relative_l2_error",
+            "Variance error convergence",
+            "relative L2 variance error",
+        ),
+        (
+            "covariance_relative_frobenius_error",
+            "Covariance error convergence",
+            "relative Frobenius covariance error",
+        ),
+    )
+
+    for ax, (metric, title, ylabel) in zip(axes.ravel()[:3], metric_specs, strict=True):
+        for name in model_names:
+            selected = sorted(
+                (row for row in rows if row["model"] == name),
+                key=lambda row: int(row["trial_count"]),
+            )
+            counts = np.asarray([int(row["trial_count"]) for row in selected])
+            values = np.asarray([float(row[metric]) for row in selected])
+            lower = np.asarray(
+                [float(row[f"{metric}_ci_lower"]) for row in selected]
+            )
+            upper = np.asarray(
+                [float(row[f"{metric}_ci_upper"]) for row in selected]
+            )
+            ax.plot(counts, values, marker="o", label=_display_name(name))
+            ax.fill_between(counts, lower, upper, alpha=0.13)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("number of trials")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(alpha=0.2)
+
+    ax = axes[1, 1]
+    for name, error in mean_error_by_time.items():
+        ax.plot(times, error, label=_display_name(name), linewidth=1.7)
+    ax.set_yscale("log")
+    ax.set_xlabel("time (µs)")
+    ax.set_ylabel("relative L2 mean error")
+    ax.set_title("Mean-profile error at maximum trial count")
+    ax.grid(alpha=0.2)
+
+    axes[0, 0].legend(fontsize=7)
+    ax.legend(fontsize=7)
+    fig.suptitle(
+        "Trial-count convergence\nshading: block-bootstrap confidence interval",
+        y=1.01,
+    )
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)

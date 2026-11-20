@@ -9,7 +9,7 @@ Laplacian eigenbasis instead of by explicitly tracking particles. The project
 has progressed from the original independent-mode formulation to correlated
 modal dynamics, physically constrained banking, adaptive modal reduction, and
 Gaussian readouts for reconstructing unresolved modes. The package, command
-line workflows, analytic references, diagnostics, and 69 tests are complete and
+line workflows, analytic references, diagnostics, and 73 tests are complete and
 passing. A five-part presentation experiment suite was completed in July 2026.
 
 The main scientific conclusion is that mean propagation is no longer the core
@@ -26,11 +26,12 @@ faster than the aggregated multinomial baseline.
 The tracked code is at commit `7834f7d` (`cleaned up repo after telluride
 hackathon`). The canonical presentation outputs are present in
 `outputs/presentation/`. The script `run_presentation_results.sh` defines that
-pipeline but is currently untracked. All 69 automated tests pass.
+pipeline but is currently untracked. All 73 automated tests pass.
 
-The next phase should focus first on statistically defensible error estimates
-and an error-based handoff/rank rule. Large-scale performance optimization
-should follow only after the reduced model's target accuracy is specified.
+Time-resolved errors, bootstrap uncertainty, and a 5,000-trial convergence
+study are now complete. The next phase should focus on an error-based
+handoff/rank rule. Large-scale performance optimization should follow only
+after the reduced model's target accuracy is specified.
 
 ## Completed work
 
@@ -46,6 +47,8 @@ should follow only after the reduced model's target accuracy is specified.
   persistent Gaussian completion readouts.
 - Added handoff/rank sweeps, cross-time covariance diagnostics, and end-to-end
   runtime/setup-memory benchmarks.
+- Added time-resolved mean/variance errors, reference-standardized mean error,
+  bootstrap uncertainty intervals, and a nested trial-count convergence CLI.
 - Generated five presentation figures with CSV data and supporting NPZ arrays.
 
 ## Experiments completed
@@ -62,10 +65,11 @@ wall-clock measurement and is not an ensemble trial.
 | 3. Handoff sweep | Raw correlated handoff over every pair of handoff step and retained rank | 101 initial modes; final modes 20, 35, 50, 75; handoff steps 1, 5, 10, 20, 50; 20 configurations; 250 trials each; seed 2 | Map the accuracy/work tradeoff and show when high-frequency modes have decayed enough to discard. This is the current empirical basis for selecting handoff time and rank. |
 | 4. Temporal-correlation comparison | Multinomial reference, full correlated, raw 101-to-50 handoff, independent completion, and persistent completion; lags 1, 2, 5, 10, 20 | 101 initial modes; 50 retained; handoff/completion at step 10; completion rank 10; 500 trials; seed 3 | Test whether fluctuations persist correctly through time. Same-time mean and covariance alone cannot distinguish independent redraws from a dynamically consistent unresolved process. |
 | 5. End-to-end performance | Multinomial, full correlated, raw handoff, independent completion, and persistent completion | Node sweep 31/51/101/151 with full ranks 31/51/101/151 and reduced ranks 16/26/50/76; particle sweep 1,000/5,275/10,000 at 101-to-50 modes; 5 timing repeats; seed 4 | Measure setup time, trajectory time, amortized time, and resident NumPy-array storage. Determine whether modal reduction creates an actual computational benefit rather than only reducing the nominal modal state. |
+| 6. Trial-count convergence | Multinomial reference; independent, correlated, and banked correlated modal models | 101 modes; nested prefixes of 100, 250, 500, 1,000, 2,000, and 5,000 trials; 200 block-bootstrap resamples; seed 20 | Separate finite-ensemble noise from structural model error, quantify uncertainty, and make the independent model's sampled-mean error directly visible. |
 
 The presentation suite did not include the earlier recommended completion-rank
-sweep (`0, 5, 10, 20, 30, 51`) or a run-count convergence study. Those should
-be added to the next experiment cycle.
+sweep (`0, 5, 10, 20, 30, 51`). That remains part of the next experiment cycle;
+the run-count convergence study has now been completed separately.
 
 ## Main results
 
@@ -97,35 +101,28 @@ be added to the next experiment cycle.
    times were about 20 ms for the multinomial, full correlated, and raw handoff
    pipelines and 24–25 ms for completed handoffs. Persistent completion held
    about 6.5 MiB of arrays versus 0.31 MiB for the full correlated model.
+7. **The 5,000-trial study separates sampling error from model error.** At
+   5,000 trials, mean/variance/covariance errors were
+   0.00060/0.021/0.038 for the multinomial reference,
+   0.00055/0.020/0.038 for correlated modal, and
+   0.00064/0.020/0.036 for banked correlated modal. The independent model's
+   errors were 0.00179/2.876/2.667. Its sampled mean error was 3.23 times the
+   multinomial reference standard-error norm, largely because its fluctuations
+   are overdispersed; its expected mean update remains analytically correct.
+
+## Completed follow-up
+
+The first two recommendations from the November review are complete. Model
+figures now show log-scale, time-resolved mean-profile error rather than only
+overlaid mean curves. Aggregate, maximum-time, and final-time mean/variance
+errors are saved with bootstrap uncertainty intervals. The nested convergence
+study reached 5,000 trials for all four core methods and shows that the
+independent variance/covariance errors plateau while the other methods continue
+to converge with the multinomial sampling floor.
 
 ## Ordered next steps
 
-### 1. Define the accuracy standard and expose existing errors
-
-This is the immediate priority. Retain the existing relative L2 mean and
-variance errors and relative Frobenius covariance errors, but report them by
-time as well as in aggregate. Add confidence intervals across independent
-seed batches. Redesign the mean panels to include a difference curve or inset,
-normalized pointwise bias, and a log-scale error panel; the independent mean
-error is too small to see on a profile dominated by the signal magnitude.
-
-For distributional comparison, add a one-dimensional Wasserstein or total
-variation distance for selected node-count marginals and a sliced Wasserstein
-or energy distance for spatial vectors. KL divergence is a poor primary metric
-because the Gaussian modal outputs and discrete multinomial counts do not share
-the same support.
-
-### 2. Run a convergence study, then increase trials
-
-“More runs” is especially important for variance and covariance. Run the key
-full-rank and 101-to-50 configurations at 100, 250, 500, 1,000, 2,000, and—if
-affordable—5,000 trials using multiple independent seed batches. Plot each
-metric and its confidence interval against trial count. Use the smallest count
-whose uncertainty is below a declared tolerance for broad sweeps, and reserve
-2,000–5,000 trials for the final headline comparisons. This is stronger than
-choosing a large number without demonstrating convergence.
-
-### 3. Replace empirical handoff selection with a predictive error rule
+### 1. Replace empirical handoff selection with a predictive error rule
 
 For every candidate retained rank `M` and handoff time `t`, compute the exact
 omitted deterministic energy and omitted covariance energy before running an
@@ -141,7 +138,7 @@ error-versus-cost Pareto frontier. Include the later-time accumulated error,
 not only the instantaneous projection error. The existing 20-point handoff
 sweep provides training/validation data but is not yet a general rule.
 
-### 4. Complete the rank/readout study and enforce physical outputs
+### 2. Complete the rank/readout study and enforce physical outputs
 
 Run completion ranks 0, 5, 10, 20, 30, and 51 at the selected handoff settings.
 Then combine persistent completion with a nonnegative, mass-conserving output
@@ -149,14 +146,21 @@ map and quantify how much it changes mean, variance, same-time covariance, and
 cross-time covariance. The goal is a reduced output that is statistically
 accurate and physically admissible, not merely one of those properties.
 
-### 5. Replace the analytic oracle closure
+### 3. Add distribution-level error metrics
+
+Add one-dimensional Wasserstein or total-variation distance for selected
+node-count marginals and a sliced Wasserstein or energy distance for spatial
+vectors. KL divergence should not be the primary metric because Gaussian modal
+outputs and discrete multinomial counts do not share the same support.
+
+### 4. Replace the analytic oracle closure
 
 Develop a structured, sparse, local, or learned unresolved process that retains
 the persistent model's temporal accuracy without dense time-indexed conditional
 gains. Train/fit on one set of particle simulations and validate on held-out
 initial conditions, particle counts, domains, and diffusivities.
 
-### 6. Optimize and scale after the scientific target is fixed
+### 5. Optimize and scale after the scientific target is fixed
 
 Scaling is important, but it should not be the next standalone activity. First
 remove full-grid noise construction from the reduced path and reduce completion

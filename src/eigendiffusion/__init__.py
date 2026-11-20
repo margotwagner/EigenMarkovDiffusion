@@ -60,10 +60,12 @@ from .ensemble import (
 from .metrics import (
     EnsembleDiagnostics,
     ValidationMetrics,
+    bootstrap_error_intervals,
     empirical_covariance,
     relative_l2_error_from_time,
     summarize,
     summarize_ensemble,
+    time_resolved_relative_l2_error,
 )
 from .readouts import (
     READOUT_NAMES,
@@ -134,6 +136,7 @@ __all__ = [
     "ValidationMetrics",
     "benchmark_diffusion_methods",
     "benchmark_random_walks",
+    "bootstrap_error_intervals",
     "continuous_expected_diffusion",
     "deterministic_diffusion",
     "deep_numpy_nbytes",
@@ -167,6 +170,7 @@ __all__ = [
     "stable_diffusion_config",
     "summarize",
     "summarize_ensemble",
+    "time_resolved_relative_l2_error",
     "trajectories_to_counts",
     "valid_time_origins",
     "write_diffusion_method_benchmark_csv",

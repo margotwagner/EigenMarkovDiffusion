@@ -15,7 +15,7 @@ set -euo pipefail
 
 mkdir -p outputs/presentation
 
-echo "1/5 Comparing the core modal models..."
+echo "1/6 Comparing the core modal models..."
 python -m eigendiffusion compare-modal-models \
   --models independent_modal correlated_modal banked_correlated_modal \
   --particles 5275 \
@@ -32,7 +32,7 @@ python -m eigendiffusion compare-modal-models \
   --csv-output outputs/presentation/01_modal_models.csv \
   --data-output outputs/presentation/01_modal_models.npz
 
-echo "2/5 Comparing reduced-model readouts and completion..."
+echo "2/6 Comparing reduced-model readouts and completion..."
 python -m eigendiffusion compare-readouts \
   --modal-model handoff_correlated_modal \
   --initial-modes 101 \
@@ -54,7 +54,7 @@ python -m eigendiffusion compare-readouts \
   --csv-output outputs/presentation/02_readouts.csv \
   --data-output outputs/presentation/02_readouts.npz
 
-echo "3/5 Sweeping handoff time and reduced mode count..."
+echo "3/6 Sweeping handoff time and reduced mode count..."
 python -m eigendiffusion sweep-handoff \
   --initial-modes 101 \
   --final-modes 20 35 50 75 \
@@ -70,7 +70,7 @@ python -m eigendiffusion sweep-handoff \
   --output outputs/presentation/03_handoff_sweep.png \
   --csv-output outputs/presentation/03_handoff_sweep.csv
 
-echo "4/5 Comparing temporal correlations..."
+echo "4/6 Comparing temporal correlations..."
 python -m eigendiffusion compare-temporal-correlation \
   --initial-modes 101 \
   --handoff-time 10 \
@@ -93,7 +93,7 @@ python -m eigendiffusion compare-temporal-correlation \
   --csv-output outputs/presentation/04_temporal_correlation.csv \
   --data-output outputs/presentation/04_temporal_correlation.npz
 
-echo "5/5 Benchmarking model performance..."
+echo "5/6 Benchmarking model performance..."
 python -m eigendiffusion benchmark-models \
   --methods multinomial_random_walk full_correlated_modal handoff_raw handoff_independent_completion handoff_persistent_completion \
   --node-counts 31 51 101 151 \
@@ -108,5 +108,23 @@ python -m eigendiffusion benchmark-models \
   --seed 4 \
   --output outputs/presentation/05_performance.png \
   --csv-output outputs/presentation/05_performance.csv
+
+echo "6/6 Measuring trial-count convergence..."
+python -m eigendiffusion study-trial-convergence \
+  --models independent_modal correlated_modal banked_correlated_modal \
+  --particles 5275 \
+  --nodes 101 \
+  --steps 101 \
+  --impulse-index 59 \
+  --modes 101 \
+  --trial-counts 100 250 500 1000 2000 5000 \
+  --bootstrap-resamples 200 \
+  --bootstrap-blocks 20 \
+  --confidence-level 0.95 \
+  --covariance-times 1 5 20 50 100 \
+  --seed 20 \
+  --output outputs/presentation/06_trial_convergence.png \
+  --csv-output outputs/presentation/06_trial_convergence.csv \
+  --data-output outputs/presentation/06_trial_convergence.npz
 
 echo "Presentation results are ready in outputs/presentation/."
