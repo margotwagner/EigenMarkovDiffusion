@@ -32,6 +32,7 @@ from .completion import (
     PersistentUnresolvedGaussianCompleter,
 )
 from .distribution_metrics import summarize_distribution_ensemble
+from .fitted_study import run_fitted_closure_study
 from .ensemble import (
     MODAL_MODEL_NAMES,
     EnsembleResult,
@@ -3149,6 +3150,57 @@ def build_parser() -> argparse.ArgumentParser:
         default="outputs/structured_closure",
     )
     structured.set_defaults(handler=run_structured_closure_study)
+
+    fitted = subparsers.add_parser(
+        "study-fitted-closure",
+        help=(
+            "Train a sparse closure from particle trajectories, validate frozen "
+            "coefficients on unseen physics, and benchmark inference scaling."
+        ),
+    )
+    fitted.add_argument("--node-counts", type=int, nargs="+", default=[51, 101, 151, 201])
+    fitted.add_argument("--particles", type=int, default=5_275)
+    fitted.add_argument("--total-time", type=float, default=100.0)
+    fitted.add_argument("--dt", type=float, default=1.0)
+    fitted.add_argument("--stability-safety", type=float, default=0.95)
+    fitted.add_argument("--bandwidth", type=int, default=12)
+    fitted.add_argument("--frequency-bins", type=int, default=8)
+    fitted.add_argument("--time-bins", type=int, default=5)
+    fitted.add_argument("--residual-grid-size", type=int, default=32)
+    fitted.add_argument("--fit-ridge", type=float, default=1.0e-3)
+    fitted.add_argument("--max-residual-samples", type=int, default=4_000)
+    fitted.add_argument("--regression-samples-per-target", type=int, default=2_000)
+    fitted.add_argument("--training-runs", type=int, default=100)
+    fitted.add_argument("--validation-runs", type=int, default=500)
+    fitted.add_argument("--heldout-runs", type=int, default=250)
+    fitted.add_argument("--repeats", type=int, default=3)
+    fitted.add_argument("--amortization-runs", type=int, default=100)
+    fitted.add_argument(
+        "--distribution-times",
+        type=float,
+        nargs="+",
+        default=[20.0, 50.0, 100.0],
+    )
+    fitted.add_argument(
+        "--distribution-node-offsets",
+        type=int,
+        nargs="+",
+        default=[-10, 0, 10],
+    )
+    fitted.add_argument("--projections", type=int, default=64)
+    fitted.add_argument("--histogram-bins", type=int, default=30)
+    fitted.add_argument(
+        "--random-walk-particle-counts",
+        type=int,
+        nargs="+",
+        default=[1_000, 5_275],
+    )
+    fitted.add_argument("--seed", type=int, default=7)
+    fitted.add_argument(
+        "--output-directory",
+        default="outputs/fitted_closure",
+    )
+    fitted.set_defaults(handler=run_fitted_closure_study)
 
     benchmark = subparsers.add_parser(
         "benchmark-random-walk",

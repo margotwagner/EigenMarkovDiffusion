@@ -41,6 +41,7 @@ from .correlated_modal import (
     CorrelatedModalDiffusion,
     HandoffCorrelatedModalDiffusion,
 )
+from .fitted_closure import FittedLocalClosureModel, FittedLocalPersistentCompleter
 from .readouts import simplex_bank_readout
 
 BenchmarkMethodName = Literal[
@@ -799,6 +800,7 @@ def _measure_operating_point(
     seed: int,
     closure: str = DEFAULT_COMPLETION_CLOSURE,
     modal_bandwidth: int = DEFAULT_LOCAL_MODAL_BANDWIDTH,
+    fitted_model: FittedLocalClosureModel | None = None,
 ) -> OperatingPointBenchmark:
     """Measure one completed and simplex-constrained pipeline in this process."""
 
@@ -848,8 +850,19 @@ def _measure_operating_point(
             config,
             **completer_kwargs,
         )
+    elif closure == "fitted_local":
+        if fitted_model is None:
+            raise ValueError("fitted_local closure requires fitted_model")
+        completer = FittedLocalPersistentCompleter(
+            config,
+            fitted_model,
+            retained_modes=final_modes,
+            completion_start_time=simulator.handoff_time,
+        )
     else:
-        raise ValueError("closure must be 'dense_persistent' or 'local_persistent'")
+        raise ValueError(
+            "closure must be dense_persistent, local_persistent, or fitted_local"
+        )
     setup_seconds = perf_counter() - setup_start
     setup_objects = (simulator, completer)
     setup_array_bytes = deep_numpy_nbytes(setup_objects)
@@ -894,7 +907,11 @@ def _measure_operating_point(
     return OperatingPointBenchmark(
         operating_point=point.name,
         closure=closure,
-        modal_bandwidth=modal_bandwidth if closure == "local_persistent" else 0,
+        modal_bandwidth=(
+            modal_bandwidth
+            if closure in {"local_persistent", "fitted_local"}
+            else 0
+        ),
         n_particles=config.n_particles,
         n_nodes=config.n_nodes,
         n_steps=config.n_steps,
@@ -924,6 +941,7 @@ def _operating_point_worker(
     seed: int,
     closure: str,
     modal_bandwidth: int,
+    fitted_model: FittedLocalClosureModel | None,
 ) -> None:
     """Spawn-process entry point used to isolate peak RSS measurements."""
 
@@ -940,6 +958,7 @@ def _operating_point_worker(
                     seed=seed,
                     closure=closure,
                     modal_bandwidth=modal_bandwidth,
+                    fitted_model=fitted_model,
                 ),
             )
         )
@@ -965,6 +984,7 @@ def benchmark_operating_points(
     isolate_peak_rss: bool = True,
     closure: str = DEFAULT_COMPLETION_CLOSURE,
     modal_bandwidth: int = DEFAULT_LOCAL_MODAL_BANDWIDTH,
+    fitted_model: FittedLocalClosureModel | None = None,
 ) -> list[OperatingPointBenchmark]:
     """Benchmark selected pipelines across spatial sizes.
 
@@ -1001,6 +1021,7 @@ def benchmark_operating_points(
                     seed=point_seed,
                     closure=closure,
                     modal_bandwidth=modal_bandwidth,
+                    fitted_model=fitted_model,
                 )
             else:
                 context = mp.get_context("spawn")
@@ -1017,6 +1038,7 @@ def benchmark_operating_points(
                         point_seed,
                         closure,
                         modal_bandwidth,
+                        fitted_model,
                     ),
                 )
                 process.start()

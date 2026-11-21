@@ -137,3 +137,19 @@ def test_structured_closure_study_cli_is_registered() -> None:
     assert args.command == "study-structured-closure"
     assert args.bandwidths == [2, 4]
     assert args.heldout_runs == 25
+
+
+def test_fitted_closure_study_cli_is_registered() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "study-fitted-closure",
+            "--training-runs",
+            "20",
+            "--frequency-bins",
+            "4",
+        ]
+    )
+    assert args.command == "study-fitted-closure"
+    assert args.training_runs == 20
+    assert args.frequency_bins == 4

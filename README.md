@@ -124,6 +124,7 @@ The available workflows are:
 | `benchmark-models` | Benchmark full, reduced, and completed model pipelines |
 | `study-operating-points` | Benchmark selected completed pipelines, peak RSS, and distribution error |
 | `study-structured-closure` | Select, validate, and scale the local persistent closure |
+| `study-fitted-closure` | Train and test a frozen trajectory-fitted sparse closure |
 | `benchmark-random-walk` | Compare particle and aggregated random-walk baselines |
 
 For example, compare the main modal formulations:
@@ -202,6 +203,11 @@ Selected completed-pipeline workflows now use the validated bandwidth-12 local
 persistent closure by default. The dense persistent readout remains available
 for reference comparisons. See
 [structured local closure](docs/STRUCTURED_LOCAL_CLOSURE.md).
+
+The first cross-configuration fitted closure was also implemented and tested,
+but it did not pass the declared variance, covariance, temporal, or runtime
+gates. It is retained as an experimental baseline; see
+[fitted closure study](docs/FITTED_CLOSURE_STUDY.md).
 
 ## Repository layout
 

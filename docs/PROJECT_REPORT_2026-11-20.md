@@ -9,7 +9,7 @@ Laplacian eigenbasis instead of by explicitly tracking particles. The project
 has progressed from the original independent-mode formulation to correlated
 modal dynamics, physically constrained banking, adaptive modal reduction, and
 Gaussian readouts for reconstructing unresolved modes. The package, command
-line workflows, analytic references, diagnostics, and 86 tests are complete and
+line workflows, analytic references, diagnostics, and 89 tests are complete and
 passing. A five-part presentation experiment suite was completed in July 2026.
 
 The main scientific conclusion is that mean propagation is no longer the core
@@ -26,12 +26,14 @@ faster than the aggregated multinomial baseline.
 The latest completed study is based on commit `2138289` plus the operating-point
 benchmark changes described here. The canonical presentation outputs are in
 `outputs/presentation/`, and `run_presentation_results.sh` defines that
-pipeline. All 86 automated tests pass.
+pipeline. All 89 automated tests pass.
 
 Time-resolved errors, bootstrap uncertainty, and a 5,000-trial convergence
 study, predictive handoff/rank rule, completion-rank study, exact pipeline
 benchmark, and distribution-level comparison are now complete. The next phase
 has replaced the dense gain with a validated bandwidth-12 structured closure.
+The first frozen trajectory-fitted replacement was implemented and rejected by
+the predeclared accuracy and runtime gates.
 
 ## Completed work
 
@@ -53,6 +55,9 @@ has replaced the dense gain with a validated bandwidth-12 structured closure.
   the three selected completed pipelines.
 - Added a row-sparse local persistent closure, profiling, held-out validation,
   and isolated scaling; bandwidth 12 is now the selected-pipeline default.
+- Added a frozen trajectory-fitted sparse closure and tested it on unseen
+  physics; it remains experimental because variance, covariance, temporal, and
+  runtime gates failed.
 - Generated five presentation figures with CSV data and supporting NPZ arrays.
 
 ## Experiments completed
@@ -74,6 +79,7 @@ wall-clock measurement and is not an ensemble trial.
 | 8. Completion and physical-output selection | Independent/persistent completion, with and without simplex banking | Completion-rank sweeps plus 500-trial headline checks at 35/50/75 modes | Select completion rank for compute/balanced/accuracy operating points and test whether nonnegativity and mass conservation distort stochastic moments. |
 | 9. Selected-pipeline scaling and distribution comparison | Persistent completion plus simplex banking at compute-first, balanced, and accuracy-first operating points | Node sweep 51/101/151/201; 3 isolated timing repeats per point; 500 trials per point at 101 nodes; 64 sliced projections; seed 5 | Measure full-pipeline runtime, setup, retained arrays, peak RSS, marginal Jensen--Shannon/Wasserstein distance, and full-vector sliced Wasserstein distance; select a default using accuracy and measured cost. |
 | 10. Structured-closure selection | Dense persistent closure versus local modal bandwidths 4/8/12/20 at the accuracy-first operating point | 500 base trials; five held-out cases with 250 trials each; node scaling 51/101/151/201; 3 timing repeats; seed 6 | Replace dense time-indexed gains, test out-of-sample robustness, and require lower setup/storage/peak RSS without distribution error beyond the sampling-floor allowance. |
+| 11. Frozen fitted-closure study | Shared bandwidth-12 frequency-binned regressions and empirical innovation banks trained on eight physical configurations | 100 training trajectories per configuration; unseen base with 500 trials; five unseen physical cases with 250 trials; node scaling 51/101/151/201; seed 7 | Remove analytic covariance from inference, test cross-configuration transfer, and compare frozen fitted inference with the analytic local closure and both random-walk baselines. |
 
 The original presentation suite did not include the completion-rank and
 selected-pipeline studies; both have now been completed separately.
@@ -162,28 +168,34 @@ peak RSS from 433.01 to 85.75 MiB, and setup time from 1.195 to 1.117 seconds.
 It is therefore the selected-pipeline default. The dense closure is retained
 as a reproducible scientific reference.
 
+The first fitted replacement did not pass. On the unseen 500-trial base case,
+its variance/covariance/lag-1 errors were 0.230/0.412/0.366, compared with
+acceptance thresholds 0.129/0.337/0.145. Similar temporal and covariance
+failures appeared on unseen impulses, particle counts, diffusivity, grid, and
+domain tests. Fitted setup at 201 nodes fell to 0.038 seconds, but trajectory
+time increased to 0.714 seconds versus 0.162 seconds for analytic-local. The
+analytic bandwidth-12 closure therefore remains the production default.
+
 ## Ordered next steps
 
-### 1. Remove the remaining analytic-moment dependency
+### 1. Condition fitted parameters on physical configuration
 
-Fit the validated sparse bandwidth-12 coefficients from training trajectories
-instead of exact multinomial moments. Preserve the row-sparse storage and
-vectorized execution path.
+Replace the single shared regression and innovation bank with sparse anchor
+models over dimensionless diffusion time, impulse location, domain scale, and
+grid resolution. Interpolate parameters between nearby anchors.
 
-### 2. Repeat the held-out suite for fitted coefficients
+### 2. Learn low-rank innovations instead of resampling vectors
 
-Fit on one training set, then validate on held-out impulse locations, particle
-counts, domain sizes, diffusivities, and grid resolutions. Require the new
-closure to remain within the multinomial sampling floor for moment and
-distribution metrics.
+Fit configuration-conditioned low-rank innovation factors. This should improve
+variance/covariance transfer and avoid storing or interpolating empirical
+innovation vectors.
 
-### 3. Benchmark against both random-walk baselines
+### 3. Vectorize fitted inference and repeat the frozen gates
 
-Remove full-grid noise construction from the reduced path and reduce completion
-setup/storage. Then repeat timing and peak-RSS measurements at larger grids and
-longer trajectories, comparing against both aggregated multinomial and naive
-particle tracking. A reduced modal state is only valuable if the complete
-pipeline wins at the declared accuracy.
+Batch feature construction across target modes and times, then repeat the same
+unseen accuracy suite and 51--201-node benchmarks against analytic-local,
+aggregated multinomial, and naive particle tracking. Do not promote the fitted
+model unless both accuracy and runtime gates pass.
 
 # Appendix A: mathematical framework
 
@@ -455,3 +467,27 @@ covariance remains `C_uu - K C_yu` and is sampled through the same configurable
 low-rank factor. With `b` spanning every modal index, this construction is
 numerically equivalent to the dense persistent closure. Experiment 10 selected
 `b = 12` under the declared sampling-floor accuracy and scaling gates.
+
+# Appendix F: frozen trajectory-fitted closure
+
+For each training trajectory, modal deviations are centered by deterministic
+mean propagation and normalized by particle-number scale,
+
+```text
+z_t = (m_t - E[m_t]) / sqrt(N).
+```
+
+Targets are assigned to normalized-frequency bins. Within each bin, ridge
+regression fits the same bandwidth-12 initial and transition feature maps used
+by the structured analytic closure. Transition features contain local previous
+unresolved coordinates and retained coordinates at the current and next time.
+Regression residual vectors are interpolated to a fixed normalized-frequency
+grid and stored in five time-indexed empirical innovation banks.
+
+At inference, the fitted model uses only deterministic mean propagation,
+frozen regression coefficients, and resampled innovation vectors. Exact
+multinomial covariance and analytic conditional gains are not constructed.
+Experiment 11 showed that this unconditional cross-configuration sharing is
+too coarse: setup becomes inexpensive, but variance, covariance, and temporal
+statistics do not transfer reliably. The artifact is retained as a negative
+baseline for configuration-conditioned successors.

@@ -1029,3 +1029,110 @@ def plot_structured_closure_study(
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return output
+
+
+def plot_fitted_closure_study(
+    validation_rows: list[dict[str, float | int | str | None]],
+    benchmark_records,
+    output_path: str | Path,
+) -> Path:
+    """Plot fitted-versus-analytic held-out accuracy and scaling."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8.2))
+    base_rows = [row for row in validation_rows if row["case"] == "base_unseen"]
+    base_models = [row for row in base_rows if row["model"] != "sampling_floor"]
+    metrics = (
+        ("variance_relative_l2_error", "variance"),
+        ("covariance_relative_frobenius_error", "covariance"),
+        ("cross_time_covariance_relative_frobenius_error", "lag-1 covariance"),
+        ("sliced_normalized_wasserstein", "sliced W1"),
+    )
+    x = np.arange(len(metrics))
+    width = 0.8 / max(len(base_models), 1)
+    for model_index, row in enumerate(base_models):
+        axes[0, 0].bar(
+            x + model_index * width,
+            [float(row[key]) for key, _ in metrics],
+            width=width,
+            label=str(row["model"]),
+        )
+    axes[0, 0].set_xticks(
+        x + width * (len(base_models) - 1) / 2,
+        [label for _, label in metrics],
+        rotation=20,
+        ha="right",
+    )
+    axes[0, 0].set_ylabel("relative error")
+    axes[0, 0].set_title("Unseen base configuration")
+    axes[0, 0].legend(fontsize=8)
+
+    cases = []
+    for row in validation_rows:
+        case = str(row["case"])
+        if case != "base_unseen" and case not in cases:
+            cases.append(case)
+    analytic = {
+        str(row["case"]): row
+        for row in validation_rows
+        if row["model"] == "analytic_local"
+    }
+    fitted = {
+        str(row["case"]): row
+        for row in validation_rows
+        if row["model"] == "fitted_local"
+    }
+    for ax, metric, title in (
+        (
+            axes[0, 1],
+            "sliced_normalized_wasserstein",
+            "Held-out distribution ratio",
+        ),
+        (
+            axes[0, 2],
+            "cross_time_covariance_relative_frobenius_error",
+            "Held-out temporal ratio",
+        ),
+    ):
+        ratios = [
+            float(fitted[case][metric]) / max(float(analytic[case][metric]), 1.0e-12)
+            for case in cases
+        ]
+        ax.bar(np.arange(len(cases)), ratios)
+        ax.axhline(1.0, color="black", linestyle="--", linewidth=1)
+        ax.set_xticks(np.arange(len(cases)), cases, rotation=25, ha="right")
+        ax.set_ylabel("fitted / analytic")
+        ax.set_title(title)
+
+    for ax, field, title, ylabel in (
+        (axes[1, 0], "setup_seconds", "Setup scaling", "seconds"),
+        (axes[1, 1], "median_run_seconds", "Trajectory scaling", "seconds"),
+        (axes[1, 2], "peak_rss_megabytes", "Peak-RSS scaling", "MiB"),
+    ):
+        closures = []
+        for record in benchmark_records:
+            if record.closure not in closures:
+                closures.append(record.closure)
+        for closure in closures:
+            selected = sorted(
+                (row for row in benchmark_records if row.closure == closure),
+                key=lambda row: row.n_nodes,
+            )
+            ax.plot(
+                [row.n_nodes for row in selected],
+                [float(getattr(row, field)) for row in selected],
+                marker="o",
+                label=closure,
+            )
+        ax.set_xlabel("spatial nodes")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.set_yscale("log")
+        ax.grid(alpha=0.2)
+    axes[1, 0].legend(fontsize=8)
+    fig.suptitle("Fitted sparse closure: unseen accuracy and scaling", y=1.01)
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output

@@ -72,6 +72,12 @@ from .ensemble import (
     run_random_walk_ensemble,
 )
 from .handoff import HandoffPrediction, pareto_handoff_indices, predict_handoff_grid
+from .fitted_closure import (
+    FittedClosureTrainingCase,
+    FittedLocalClosureModel,
+    FittedLocalPersistentCompleter,
+    complete_fitted_ensemble,
+)
 from .metrics import (
     EnsembleDiagnostics,
     ValidationMetrics,
@@ -135,6 +141,9 @@ __all__ = [
     "EigenMarkovResult",
     "EnsembleDiagnostics",
     "EnsembleResult",
+    "FittedClosureTrainingCase",
+    "FittedLocalClosureModel",
+    "FittedLocalPersistentCompleter",
     "IndependentModalDiffusion",
     "LocalPersistentUnresolvedGaussianCompleter",
     "MODAL_MODEL_NAMES",
@@ -162,6 +171,7 @@ __all__ = [
     "benchmark_random_walks",
     "bootstrap_error_intervals",
     "continuous_expected_diffusion",
+    "complete_fitted_ensemble",
     "deterministic_diffusion",
     "deep_numpy_nbytes",
     "discrete_expected_diffusion",
