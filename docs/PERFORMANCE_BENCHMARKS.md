@@ -120,3 +120,30 @@ and memory because the current oracle stores large conditional gain matrices at
 many time points. Run 31–201 nodes first. A steep setup-memory curve is itself
 evidence that the next implementation should replace the analytic oracle with
 a local, structured, or learned closure.
+
+## Selected operating-point benchmark
+
+`study-operating-points` benchmarks the three final persistent-completion plus
+simplex-bank configurations in fresh processes. Unlike `benchmark-models`, it
+therefore reports an uncontaminated process peak RSS for every configuration.
+Mode count and completion rank are scaled proportionally away from the
+101-node reference grid.
+
+The November 20, 2026 headline run used 51, 101, 151, and 201 nodes, three
+timing repeats, and 500 accuracy trials. At 101 nodes, amortized trajectory
+times were 0.0581 s (compute-first), 0.0598 s (balanced), and 0.0571 s
+(accuracy-first). Peak RSS was 124--126 MiB. At 201 nodes, peak RSS reached
+433--435 MiB and setup time reached 1.12--1.69 s, demonstrating that the dense
+analytic completion oracle, rather than retained modal count alone, controls
+memory scaling.
+
+The same command compares each pipeline with an independent multinomial
+ensemble using:
+
+- one-dimensional Wasserstein-1 distance and common-bin Jensen--Shannon
+  divergence for selected node marginals;
+- sliced Wasserstein-1 distance for the full spatial count vector;
+- a second multinomial ensemble as the finite-trial sampling floor.
+
+Raw KL divergence is intentionally not used because continuous Gaussian modal
+outputs and discrete multinomial counts do not share identical support.

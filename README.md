@@ -120,6 +120,7 @@ The available workflows are:
 | `sweep-completion-rank` | Sweep unresolved Gaussian completion rank |
 | `compare-temporal-correlation` | Compare empirical and exact cross-time covariance |
 | `benchmark-models` | Benchmark full, reduced, and completed model pipelines |
+| `study-operating-points` | Benchmark selected completed pipelines, peak RSS, and distribution error |
 | `benchmark-random-walk` | Compare particle and aggregated random-walk baselines |
 
 For example, compare the main modal formulations:
@@ -179,6 +180,20 @@ The completion-rank sweep accepts independent, persistent, and simplex-banked
 completion readouts and reports both same-time and cross-time covariance error.
 See [predictive handoff selection](docs/HANDOFF_SELECTION.md) and
 [completion selection](docs/COMPLETION_SELECTION.md) for the completed studies.
+
+The selected-pipeline study reproduces the final accuracy/cost decision:
+
+```bash
+python -m eigendiffusion study-operating-points \
+  --node-counts 51 101 151 201 \
+  --accuracy-nodes 101 \
+  --accuracy-runs 500 \
+  --repeats 3
+```
+
+It measures setup and trajectory time, retained arrays, isolated process peak
+RSS, selected-node Jensen--Shannon and Wasserstein distances, and sliced
+Wasserstein distance for full spatial vectors.
 
 ## Repository layout
 

@@ -12,12 +12,17 @@ import numpy as np
 
 from .benchmarking import (
     BENCHMARK_METHOD_NAMES,
+    SELECTED_OPERATING_POINTS,
+    benchmark_operating_points,
     benchmark_diffusion_methods,
     benchmark_random_walks,
+    stable_diffusion_config,
     write_benchmark_csv,
     write_diffusion_method_benchmark_csv,
+    write_operating_point_benchmark_csv,
 )
 from .config import DiffusionConfig
+from .distribution_metrics import summarize_distribution_ensemble
 from .ensemble import (
     MODAL_MODEL_NAMES,
     EnsembleResult,
@@ -42,6 +47,7 @@ from .plotting import (
     plot_completion_rank_sweep,
     plot_mode_sweep,
     plot_model_comparison,
+    plot_operating_point_study,
     plot_random_walk_benchmark,
     plot_temporal_correlation_comparison,
     plot_trial_convergence,
@@ -1795,6 +1801,234 @@ def run_diffusion_method_benchmark(args: argparse.Namespace) -> int:
     print(json.dumps(report, indent=2))
     return 0
 
+
+def run_operating_point_study(args: argparse.Namespace) -> int:
+    """Benchmark selected pipelines and compare their full distributions."""
+
+    node_counts = sorted(set(args.node_counts))
+    records = benchmark_operating_points(
+        node_counts=node_counts,
+        n_particles=args.particles,
+        total_time=args.total_time,
+        requested_dt=args.dt,
+        length=args.length,
+        diffusion_coefficient=args.diffusion,
+        impulse_fraction=args.impulse_fraction,
+        completion_ridge=args.completion_ridge,
+        repeats=args.repeats,
+        amortization_runs=args.amortization_runs,
+        stability_safety=args.stability_safety,
+        seed=args.seed,
+        isolate_peak_rss=not args.no_isolate_peak_rss,
+    )
+    benchmark_csv = write_operating_point_benchmark_csv(records, args.csv_output)
+
+    config = stable_diffusion_config(
+        n_particles=args.particles,
+        n_nodes=args.accuracy_nodes,
+        total_time=args.total_time,
+        requested_dt=args.dt,
+        length=args.length,
+        diffusion_coefficient=args.diffusion,
+        impulse_fraction=args.impulse_fraction,
+        stability_safety=args.stability_safety,
+    )
+    time_indices, selected_times = _nearest_time_indices(
+        config.times,
+        args.distribution_times,
+        exclude_zero=True,
+    )
+    node_indices = sorted(
+        {
+            min(config.n_nodes - 1, max(0, config.impulse_index + offset))
+            for offset in args.distribution_node_offsets
+        }
+    )
+    reference_a = run_random_walk_ensemble(
+        config,
+        n_runs=args.accuracy_runs,
+        seed=args.seed + 100_000,
+        method="multinomial",
+    )
+    reference_b = run_random_walk_ensemble(
+        config,
+        n_runs=args.accuracy_runs,
+        seed=args.seed + 200_000,
+        method="multinomial",
+    )
+    analytic_mean = discrete_expected_diffusion(config)
+    analytic_variance = multinomial_marginal_variance(config)
+    analytic_covariance = multinomial_marginal_covariance(config)
+    accuracy_rows: list[dict[str, float | int | str | None]] = []
+
+    floor_metrics = summarize_distribution_ensemble(
+        reference_a.runs,
+        reference_b.runs,
+        time_indices=time_indices,
+        node_indices=node_indices,
+        n_projections=args.projections,
+        histogram_bins=args.histogram_bins,
+        seed=args.seed,
+    )
+    accuracy_rows.append(
+        {
+            "operating_point": "sampling_floor",
+            "n_nodes": config.n_nodes,
+            "final_modes": config.n_nodes,
+            "handoff_time": 0.0,
+            "completion_rank": 0,
+            **floor_metrics.as_dict(),
+        }
+    )
+
+    for point_index, point in enumerate(SELECTED_OPERATING_POINTS):
+        modes, handoff_time, completion_rank = point.scaled(
+            config.n_nodes,
+            float(config.times[-1]),
+        )
+        raw = run_modal_ensemble(
+            config,
+            n_runs=args.accuracy_runs,
+            model="handoff_correlated_modal",
+            n_modes=modes,
+            initial_n_modes=config.n_nodes,
+            handoff_time=handoff_time,
+            seed=args.seed + 300_000 + point_index,
+        )
+        completed = apply_readout_ensemble(
+            raw,
+            config,
+            readout="persistent_unresolved_completion_simplex_bank",
+            retained_modes=modes,
+            completion_start_time=handoff_time,
+            completion_rank=completion_rank,
+            completion_ridge=args.completion_ridge,
+            seed=args.seed + 400_000 + point_index,
+        )
+        distribution = summarize_distribution_ensemble(
+            reference_a.runs,
+            completed.runs,
+            time_indices=time_indices,
+            node_indices=node_indices,
+            n_projections=args.projections,
+            histogram_bins=args.histogram_bins,
+            seed=args.seed,
+        )
+        moment = summarize_ensemble(
+            analytic_mean,
+            analytic_variance,
+            completed.runs,
+            config.n_particles,
+            reference_covariance=analytic_covariance,
+            covariance_time_indices=time_indices,
+        )
+        accuracy_rows.append(
+            {
+                "operating_point": point.name,
+                "n_nodes": config.n_nodes,
+                "final_modes": modes,
+                "handoff_time": handoff_time,
+                "completion_rank": completion_rank,
+                **distribution.as_dict(),
+                "mean_relative_l2_error": moment.mean_relative_l2_error,
+                "variance_relative_l2_error": moment.variance_relative_l2_error,
+                "covariance_relative_frobenius_error": (
+                    moment.covariance_relative_frobenius_error
+                ),
+                "mean_negative_mass_fraction": moment.mean_negative_mass_fraction,
+                "maximum_mass_error": moment.maximum_mass_error,
+            }
+        )
+        del raw, completed
+        gc.collect()
+
+    accuracy_csv = Path(args.distribution_csv_output)
+    accuracy_csv.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in accuracy_rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with accuracy_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(accuracy_rows)
+
+    model_rows = [
+        row for row in accuracy_rows if row["operating_point"] != "sampling_floor"
+    ]
+    floor_row = accuracy_rows[0]
+
+    def distribution_score(row: dict[str, float | int | str | None]) -> float:
+        return 0.5 * (
+            float(row["marginal_normalized_wasserstein"])
+            + float(row["sliced_normalized_wasserstein"])
+        )
+
+    best_accuracy = min(distribution_score(row) for row in model_rows)
+    sampling_floor = distribution_score(floor_row)
+    accuracy_threshold = best_accuracy + sampling_floor
+    eligible = [
+        row for row in model_rows if distribution_score(row) <= accuracy_threshold
+    ]
+    base_benchmarks = {
+        record.operating_point: record
+        for record in records
+        if record.n_nodes == args.accuracy_nodes
+    }
+    if len(base_benchmarks) != len(SELECTED_OPERATING_POINTS):
+        raise ValueError("accuracy_nodes must also be present in node_counts")
+    recommended = min(
+        eligible,
+        key=lambda row: base_benchmarks[str(row["operating_point"])].amortized_seconds_per_run,
+    )
+    recommended_name = str(recommended["operating_point"])
+    figure = plot_operating_point_study(records, accuracy_rows, args.output)
+
+    summary = {
+        "recommended_default": recommended_name,
+        "selection_rule": (
+            "lowest amortized runtime among points whose mean normalized "
+            "distribution score is within one reference sampling-floor score "
+            "of the best observed score"
+        ),
+        "accuracy_threshold": accuracy_threshold,
+        "sampling_floor_score": sampling_floor,
+        "distribution_times": selected_times,
+        "distribution_nodes": node_indices,
+        "benchmark_csv": str(benchmark_csv),
+        "distribution_csv": str(accuracy_csv),
+        "figure": str(figure),
+    }
+    summary_path = Path(args.summary_output)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+    print(
+        "nodes  point            modes  handoff  rank  setup_s  run_s  "
+        "amortized_s  peak_RSS_MiB"
+    )
+    for record in records:
+        print(
+            f"{record.n_nodes:5d}  {record.operating_point:16s} "
+            f"{record.final_modes:5d}  {record.handoff_time:7.2f}  "
+            f"{record.completion_rank:4d}  {record.setup_seconds:7.3f}  "
+            f"{record.median_run_seconds:6.3f}  "
+            f"{record.amortized_seconds_per_run:11.3f}  "
+            f"{record.peak_rss_megabytes:12.1f}"
+        )
+    print("\nDistribution accuracy at the reference grid:")
+    for row in accuracy_rows:
+        print(
+            f"{str(row['operating_point']):16s}  "
+            f"marginal_W1={float(row['marginal_normalized_wasserstein']):.4f}  "
+            f"JS={float(row['marginal_jensen_shannon']):.4f}  "
+            f"sliced_W1={float(row['sliced_normalized_wasserstein']):.4f}"
+        )
+    print(f"\nRecommended default: {recommended_name}")
+    print(json.dumps(summary, indent=2))
+    return 0
+
 def run_random_walk_benchmark(args: argparse.Namespace) -> int:
     base_config = DiffusionConfig(
         n_particles=args.particle_counts[0],
@@ -2269,6 +2503,70 @@ def build_parser() -> argparse.ArgumentParser:
         default="outputs/performance/model_scaling.csv",
     )
     method_benchmark.set_defaults(handler=run_diffusion_method_benchmark)
+
+    operating_points = subparsers.add_parser(
+        "study-operating-points",
+        help=(
+            "Benchmark the compute-first, balanced, and accuracy-first completed "
+            "pipelines and measure distribution-level error."
+        ),
+    )
+    operating_points.add_argument(
+        "--node-counts",
+        type=int,
+        nargs="+",
+        default=[51, 101, 151, 201],
+    )
+    operating_points.add_argument("--accuracy-nodes", type=int, default=101)
+    operating_points.add_argument("--particles", type=int, default=5_275)
+    operating_points.add_argument("--total-time", type=float, default=100.0)
+    operating_points.add_argument("--dt", type=float, default=1.0)
+    operating_points.add_argument("--length", type=float, default=4.0)
+    operating_points.add_argument("--diffusion", type=float, default=2.20e-4)
+    operating_points.add_argument("--impulse-fraction", type=float, default=0.59)
+    operating_points.add_argument("--completion-ridge", type=float, default=0.01)
+    operating_points.add_argument("--repeats", type=int, default=3)
+    operating_points.add_argument("--amortization-runs", type=int, default=100)
+    operating_points.add_argument("--stability-safety", type=float, default=0.95)
+    operating_points.add_argument("--accuracy-runs", type=int, default=500)
+    operating_points.add_argument(
+        "--distribution-times",
+        type=float,
+        nargs="+",
+        default=[20.0, 50.0, 100.0],
+    )
+    operating_points.add_argument(
+        "--distribution-node-offsets",
+        type=int,
+        nargs="+",
+        default=[-10, 0, 10],
+        help="Node offsets from the impulse used for marginal distances.",
+    )
+    operating_points.add_argument("--projections", type=int, default=64)
+    operating_points.add_argument("--histogram-bins", type=int, default=30)
+    operating_points.add_argument("--seed", type=int, default=5)
+    operating_points.add_argument(
+        "--no-isolate-peak-rss",
+        action="store_true",
+        help="Run in-process; intended only for fast tests, not headline peak RSS.",
+    )
+    operating_points.add_argument(
+        "--output",
+        default="outputs/operating_points/benchmark_and_distribution.png",
+    )
+    operating_points.add_argument(
+        "--csv-output",
+        default="outputs/operating_points/scaling.csv",
+    )
+    operating_points.add_argument(
+        "--distribution-csv-output",
+        default="outputs/operating_points/distribution_accuracy.csv",
+    )
+    operating_points.add_argument(
+        "--summary-output",
+        default="outputs/operating_points/summary.json",
+    )
+    operating_points.set_defaults(handler=run_operating_point_study)
 
     benchmark = subparsers.add_parser(
         "benchmark-random-walk",

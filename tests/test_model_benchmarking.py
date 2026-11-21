@@ -4,6 +4,8 @@ import numpy as np
 
 from eigendiffusion.benchmarking import (
     BENCHMARK_METHOD_NAMES,
+    SELECTED_OPERATING_POINTS,
+    benchmark_operating_points,
     benchmark_diffusion_methods,
     deep_numpy_nbytes,
     stable_diffusion_config,
@@ -77,3 +79,43 @@ def test_benchmark_models_cli_is_registered() -> None:
     assert args.command == "benchmark-models"
     assert args.node_counts == [31]
     assert args.completion_rank == 5
+
+
+def test_selected_operating_points_scale_and_benchmark() -> None:
+    balanced = SELECTED_OPERATING_POINTS[1]
+    assert balanced.scaled(101, 100.0) == (50, 10.0, 10)
+    records = benchmark_operating_points(
+        node_counts=[9],
+        n_particles=50,
+        total_time=1.0,
+        requested_dt=0.2,
+        repeats=1,
+        amortization_runs=5,
+        isolate_peak_rss=False,
+        seed=8,
+    )
+    assert len(records) == 3
+    assert {record.operating_point for record in records} == {
+        "compute_first",
+        "balanced",
+        "accuracy_first",
+    }
+    assert all(record.peak_rss_bytes > 0 for record in records)
+
+
+def test_operating_point_study_cli_is_registered() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "study-operating-points",
+            "--node-counts",
+            "11",
+            "--accuracy-nodes",
+            "11",
+            "--accuracy-runs",
+            "20",
+        ]
+    )
+    assert args.command == "study-operating-points"
+    assert args.accuracy_nodes == 11
+    assert args.accuracy_runs == 20

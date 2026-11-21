@@ -19,7 +19,8 @@ BLAS/LAPACK workspaces.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass, fields, is_dataclass, replace
+import multiprocessing as mp
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from time import perf_counter
 from typing import Callable, Literal
@@ -39,6 +40,7 @@ from .correlated_modal import (
     CorrelatedModalDiffusion,
     HandoffCorrelatedModalDiffusion,
 )
+from .readouts import simplex_bank_readout
 
 BenchmarkMethodName = Literal[
     "multinomial_random_walk",
@@ -54,6 +56,82 @@ BENCHMARK_METHOD_NAMES: tuple[BenchmarkMethodName, ...] = (
     "handoff_independent_completion",
     "handoff_persistent_completion",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class OperatingPoint:
+    """One selected persistent-completion pipeline at the 101-node reference."""
+
+    name: str
+    reference_modes: int
+    reference_handoff_time: float
+    reference_completion_rank: int
+
+    def scaled(self, n_nodes: int, total_time: float) -> tuple[int, float, int]:
+        """Scale mode count, handoff time, and completion rank proportionally."""
+
+        if n_nodes < 2:
+            raise ValueError("n_nodes must be at least two")
+        modes = min(
+            n_nodes - 1,
+            max(1, int(round(n_nodes * self.reference_modes / 101.0))),
+        )
+        omitted = n_nodes - modes
+        rank = min(
+            omitted,
+            max(1, int(round(n_nodes * self.reference_completion_rank / 101.0))),
+        )
+        handoff_time = total_time * self.reference_handoff_time / 100.0
+        return modes, handoff_time, rank
+
+
+SELECTED_OPERATING_POINTS: tuple[OperatingPoint, ...] = (
+    OperatingPoint("compute_first", 35, 20.0, 20),
+    OperatingPoint("balanced", 50, 10.0, 10),
+    OperatingPoint("accuracy_first", 75, 30.0, 5),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OperatingPointBenchmark:
+    """Isolated runtime and peak-memory result for one operating point."""
+
+    operating_point: str
+    n_particles: int
+    n_nodes: int
+    n_steps: int
+    final_modes: int
+    handoff_time: float
+    completion_rank: int
+    repeats: int
+    amortization_runs: int
+    setup_seconds: float
+    median_run_seconds: float
+    mean_run_seconds: float
+    std_run_seconds: float
+    amortized_seconds_per_run: float
+    setup_array_bytes: int
+    resident_array_bytes: int
+    peak_rss_bytes: int
+
+    @property
+    def setup_array_megabytes(self) -> float:
+        return self.setup_array_bytes / 1024**2
+
+    @property
+    def resident_array_megabytes(self) -> float:
+        return self.resident_array_bytes / 1024**2
+
+    @property
+    def peak_rss_megabytes(self) -> float:
+        return self.peak_rss_bytes / 1024**2
+
+    def as_dict(self) -> dict[str, str | int | float]:
+        row = asdict(self)
+        row["setup_array_megabytes"] = self.setup_array_megabytes
+        row["resident_array_megabytes"] = self.resident_array_megabytes
+        row["peak_rss_megabytes"] = self.peak_rss_megabytes
+        return row
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,5 +769,226 @@ def write_diffusion_method_benchmark_csv(
     output_path: str | Path,
 ) -> Path:
     """Write end-to-end method benchmark summaries to CSV."""
+
+    return _write_rows_csv([record.as_dict() for record in records], output_path)
+
+
+def _peak_rss_bytes() -> int:
+    """Return this process's peak RSS in bytes on Unix-like systems."""
+
+    import resource
+    import sys
+
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    # macOS reports bytes; Linux and the project's execution environment report KiB.
+    return value if sys.platform == "darwin" else value * 1024
+
+
+def _measure_operating_point(
+    config: DiffusionConfig,
+    point: OperatingPoint,
+    *,
+    completion_ridge: float,
+    repeats: int,
+    amortization_runs: int,
+    seed: int,
+) -> OperatingPointBenchmark:
+    """Measure one completed and simplex-constrained pipeline in this process."""
+
+    final_modes, handoff_time, completion_rank = point.scaled(
+        config.n_nodes,
+        float(config.times[-1]),
+    )
+    setup_start = perf_counter()
+    simulator = HandoffCorrelatedModalDiffusion(
+        config=config,
+        initial_n_modes=config.n_nodes,
+        final_n_modes=final_modes,
+        handoff_time=handoff_time,
+    )
+    completer = PersistentUnresolvedGaussianCompleter(
+        config,
+        retained_modes=final_modes,
+        completion_start_time=simulator.handoff_time,
+        completion_rank=completion_rank,
+        ridge=completion_ridge,
+    )
+    setup_seconds = perf_counter() - setup_start
+    setup_objects = (simulator, completer)
+    setup_array_bytes = deep_numpy_nbytes(setup_objects)
+
+    sequences = np.random.SeedSequence(
+        [seed, config.n_nodes, point.reference_modes]
+    ).spawn(repeats + 1)
+
+    def run_once(sequence: np.random.SeedSequence) -> tuple[float, tuple[object, ...]]:
+        simulation_sequence, completion_sequence = sequence.spawn(2)
+        start = perf_counter()
+        result = simulator.run(rng=np.random.default_rng(simulation_sequence))
+        completed, additions = completer.complete(
+            result.spatial_counts,
+            rng=np.random.default_rng(completion_sequence),
+        )
+        constrained = simplex_bank_readout(completed, config.n_particles)
+        elapsed = perf_counter() - start
+        payload = _RunPayload(
+            counts=constrained.counts,
+            retained_objects=(result, completed, additions, constrained),
+        )
+        _validate_benchmark_output(payload, config)
+        return elapsed, payload.retained_objects
+
+    # Warm up lazy BLAS paths before collecting timings.
+    run_once(sequences[0])
+    timings: list[float] = []
+    resident_array_bytes = setup_array_bytes
+    for sequence in sequences[1:]:
+        elapsed, retained = run_once(sequence)
+        timings.append(elapsed)
+        resident_array_bytes = max(
+            resident_array_bytes,
+            deep_numpy_nbytes((setup_objects, retained)),
+        )
+
+    values = np.asarray(timings, dtype=float)
+    median = float(np.median(values))
+    return OperatingPointBenchmark(
+        operating_point=point.name,
+        n_particles=config.n_particles,
+        n_nodes=config.n_nodes,
+        n_steps=config.n_steps,
+        final_modes=final_modes,
+        handoff_time=handoff_time,
+        completion_rank=completion_rank,
+        repeats=repeats,
+        amortization_runs=amortization_runs,
+        setup_seconds=setup_seconds,
+        median_run_seconds=median,
+        mean_run_seconds=float(np.mean(values)),
+        std_run_seconds=float(np.std(values, ddof=0)),
+        amortized_seconds_per_run=median + setup_seconds / amortization_runs,
+        setup_array_bytes=setup_array_bytes,
+        resident_array_bytes=resident_array_bytes,
+        peak_rss_bytes=_peak_rss_bytes(),
+    )
+
+
+def _operating_point_worker(
+    queue,
+    config: DiffusionConfig,
+    point: OperatingPoint,
+    completion_ridge: float,
+    repeats: int,
+    amortization_runs: int,
+    seed: int,
+) -> None:
+    """Spawn-process entry point used to isolate peak RSS measurements."""
+
+    try:
+        queue.put(
+            (
+                True,
+                _measure_operating_point(
+                    config,
+                    point,
+                    completion_ridge=completion_ridge,
+                    repeats=repeats,
+                    amortization_runs=amortization_runs,
+                    seed=seed,
+                ),
+            )
+        )
+    except BaseException as error:  # pragma: no cover - child failure path
+        queue.put((False, f"{type(error).__name__}: {error}"))
+
+
+def benchmark_operating_points(
+    *,
+    node_counts: list[int],
+    n_particles: int = 5_275,
+    total_time: float = 100.0,
+    requested_dt: float = 1.0,
+    length: float = 4.0,
+    diffusion_coefficient: float = 2.20e-4,
+    impulse_fraction: float = 0.59,
+    operating_points: tuple[OperatingPoint, ...] = SELECTED_OPERATING_POINTS,
+    completion_ridge: float = 1.0e-2,
+    repeats: int = 3,
+    amortization_runs: int = 100,
+    stability_safety: float = 0.95,
+    seed: int = 0,
+    isolate_peak_rss: bool = True,
+) -> list[OperatingPointBenchmark]:
+    """Benchmark selected pipelines across spatial sizes.
+
+    With ``isolate_peak_rss=True``, every configuration runs in a fresh spawned
+    process.  This prevents an earlier, larger allocation from contaminating a
+    later process-wide peak-RSS measurement.
+    """
+
+    if not node_counts or any(value < 2 for value in node_counts):
+        raise ValueError("node_counts must contain integers >= 2")
+    if repeats <= 0 or amortization_runs <= 0:
+        raise ValueError("repeats and amortization_runs must be positive")
+    records: list[OperatingPointBenchmark] = []
+    for n_nodes in sorted(set(int(value) for value in node_counts)):
+        config = stable_diffusion_config(
+            n_particles=n_particles,
+            n_nodes=n_nodes,
+            total_time=total_time,
+            requested_dt=requested_dt,
+            length=length,
+            diffusion_coefficient=diffusion_coefficient,
+            impulse_fraction=impulse_fraction,
+            stability_safety=stability_safety,
+        )
+        for point_index, point in enumerate(operating_points):
+            point_seed = seed + 10_000 * n_nodes + point_index
+            if not isolate_peak_rss:
+                record = _measure_operating_point(
+                    config,
+                    point,
+                    completion_ridge=completion_ridge,
+                    repeats=repeats,
+                    amortization_runs=amortization_runs,
+                    seed=point_seed,
+                )
+            else:
+                context = mp.get_context("spawn")
+                queue = context.Queue()
+                process = context.Process(
+                    target=_operating_point_worker,
+                    args=(
+                        queue,
+                        config,
+                        point,
+                        completion_ridge,
+                        repeats,
+                        amortization_runs,
+                        point_seed,
+                    ),
+                )
+                process.start()
+                success, payload = queue.get()
+                process.join()
+                queue.close()
+                if not success:
+                    raise RuntimeError(
+                        f"operating-point benchmark failed for {point.name}: {payload}"
+                    )
+                if process.exitcode != 0:
+                    raise RuntimeError(
+                        f"operating-point benchmark exited with code {process.exitcode}"
+                    )
+                record = payload
+            records.append(record)
+    return records
+
+
+def write_operating_point_benchmark_csv(
+    records: list[OperatingPointBenchmark],
+    output_path: str | Path,
+) -> Path:
+    """Write selected operating-point benchmark records."""
 
     return _write_rows_csv([record.as_dict() for record in records], output_path)

@@ -837,3 +837,93 @@ def plot_diffusion_method_benchmark(
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return output
+
+
+def plot_operating_point_study(
+    records,
+    accuracy_rows: list[dict[str, float | int | str | None]],
+    output_path: str | Path,
+) -> Path:
+    """Plot exact pipeline scaling and distribution-level accuracy."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    names = []
+    for record in records:
+        if record.operating_point not in names:
+            names.append(record.operating_point)
+
+    labels = {
+        "compute_first": "compute-first",
+        "balanced": "balanced",
+        "accuracy_first": "accuracy-first",
+        "sampling_floor": "reference sampling floor",
+    }
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8.2))
+    benchmark_panels = (
+        ("median_run_seconds", "Per-trajectory runtime", "seconds"),
+        ("setup_seconds", "One-time setup", "seconds"),
+        ("peak_rss_megabytes", "Isolated peak RSS", "MiB"),
+        ("resident_array_megabytes", "Retained NumPy arrays", "MiB"),
+    )
+    for ax, (field, title, ylabel) in zip(
+        axes.ravel()[:4], benchmark_panels, strict=True
+    ):
+        for name in names:
+            selected = sorted(
+                (row for row in records if row.operating_point == name),
+                key=lambda row: row.n_nodes,
+            )
+            ax.plot(
+                [row.n_nodes for row in selected],
+                [float(getattr(row, field)) for row in selected],
+                marker="o",
+                label=labels.get(name, name),
+            )
+        ax.set_title(title)
+        ax.set_xlabel("spatial nodes")
+        ax.set_ylabel(ylabel)
+        ax.set_yscale("log")
+        ax.grid(alpha=0.2)
+    axes[0, 0].legend(fontsize=8)
+
+    accuracy_panels = (
+        (
+            "marginal_normalized_wasserstein",
+            "Selected-node marginals",
+            "normalized Wasserstein-1",
+        ),
+        (
+            "sliced_normalized_wasserstein",
+            "Full spatial vectors",
+            "normalized sliced Wasserstein-1",
+        ),
+    )
+    for ax, (field, title, ylabel) in zip(
+        axes.ravel()[4:], accuracy_panels, strict=True
+    ):
+        rows = [row for row in accuracy_rows if row.get(field) is not None]
+        positions = np.arange(len(rows))
+        ax.bar(
+            positions,
+            [float(row[field]) for row in rows],
+            color=["0.65" if row["operating_point"] == "sampling_floor" else "C0" for row in rows],
+        )
+        ax.set_xticks(
+            positions,
+            [labels.get(str(row["operating_point"]), str(row["operating_point"])) for row in rows],
+            rotation=18,
+            ha="right",
+        )
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.grid(axis="y", alpha=0.2)
+
+    fig.suptitle(
+        "Selected completed pipelines: measured cost and distribution accuracy",
+        y=1.01,
+    )
+    fig.tight_layout()
+    fig.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output

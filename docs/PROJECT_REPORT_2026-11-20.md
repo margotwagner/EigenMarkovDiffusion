@@ -9,7 +9,7 @@ Laplacian eigenbasis instead of by explicitly tracking particles. The project
 has progressed from the original independent-mode formulation to correlated
 modal dynamics, physically constrained banking, adaptive modal reduction, and
 Gaussian readouts for reconstructing unresolved modes. The package, command
-line workflows, analytic references, diagnostics, and 79 tests are complete and
+line workflows, analytic references, diagnostics, and 83 tests are complete and
 passing. A five-part presentation experiment suite was completed in July 2026.
 
 The main scientific conclusion is that mean propagation is no longer the core
@@ -18,20 +18,20 @@ variance, and same-time covariance to within ensemble sampling error. A reduced
 50-mode model can recover those same-time statistics through Gaussian
 completion, and persistent completion also recovers short-lag temporal
 correlation. However, the completion is an analytic oracle, can produce
-negative/noninteger counts, consumes substantial setup memory, and is not yet
+noninteger counts, consumes substantial setup memory, and is not yet
 faster than the aggregated multinomial baseline.
 
 ## Where we left off
 
-The tracked code is at commit `7834f7d` (`cleaned up repo after telluride
-hackathon`). The canonical presentation outputs are present in
-`outputs/presentation/`. The script `run_presentation_results.sh` defines that
-pipeline but is currently untracked. All 79 automated tests pass.
+The latest completed study is based on commit `2138289` plus the operating-point
+benchmark changes described here. The canonical presentation outputs are in
+`outputs/presentation/`, and `run_presentation_results.sh` defines that
+pipeline. All 83 automated tests pass.
 
 Time-resolved errors, bootstrap uncertainty, and a 5,000-trial convergence
-study are now complete. The next phase should focus on an error-based
-handoff/rank rule. Large-scale performance optimization should follow only
-after the reduced model's target accuracy is specified.
+study, predictive handoff/rank rule, completion-rank study, exact pipeline
+benchmark, and distribution-level comparison are now complete. The next phase
+should replace the dense analytic completion oracle with a scalable closure.
 
 ## Completed work
 
@@ -49,6 +49,8 @@ after the reduced model's target accuracy is specified.
   runtime/setup-memory benchmarks.
 - Added time-resolved mean/variance errors, reference-standardized mean error,
   bootstrap uncertainty intervals, and a nested trial-count convergence CLI.
+- Added isolated peak-RSS scaling and marginal/sliced distribution metrics for
+  the three selected completed pipelines.
 - Generated five presentation figures with CSV data and supporting NPZ arrays.
 
 ## Experiments completed
@@ -68,10 +70,10 @@ wall-clock measurement and is not an ensemble trial.
 | 6. Trial-count convergence | Multinomial reference; independent, correlated, and banked correlated modal models | 101 modes; nested prefixes of 100, 250, 500, 1,000, 2,000, and 5,000 trials; 200 block-bootstrap resamples; seed 20 | Separate finite-ensemble noise from structural model error, quantify uncertainty, and make the independent model's sampled-mean error directly visible. |
 | 7. Predictive handoff selection | Analytic modal-energy predictor validated against correlated handoff ensembles | 35, 50, 60, 75 retained modes; handoff steps 10, 15, 20, 30; 16 held-out configurations; 250 trials each | Predict post-handoff mean, variance, and covariance loss before running an ensemble and identify the accuracy/work Pareto frontier. |
 | 8. Completion and physical-output selection | Independent/persistent completion, with and without simplex banking | Completion-rank sweeps plus 500-trial headline checks at 35/50/75 modes | Select completion rank for compute/balanced/accuracy operating points and test whether nonnegativity and mass conservation distort stochastic moments. |
+| 9. Selected-pipeline scaling and distribution comparison | Persistent completion plus simplex banking at compute-first, balanced, and accuracy-first operating points | Node sweep 51/101/151/201; 3 isolated timing repeats per point; 500 trials per point at 101 nodes; 64 sliced projections; seed 5 | Measure full-pipeline runtime, setup, retained arrays, peak RSS, marginal Jensen--Shannon/Wasserstein distance, and full-vector sliced Wasserstein distance; select a default using accuracy and measured cost. |
 
-The presentation suite did not include the earlier recommended completion-rank
-sweep (`0, 5, 10, 20, 30, 51`). That remains part of the next experiment cycle;
-the run-count convergence study has now been completed separately.
+The original presentation suite did not include the completion-rank and
+selected-pipeline studies; both have now been completed separately.
 
 ## Main results
 
@@ -133,37 +135,45 @@ near the appropriate ensemble sampling floor. The compute-first point uses
 47.7% of full modal updates, versus 54.6% for balanced and 82.0% for
 accuracy-first.
 
+The exact full-pipeline benchmark changes the cost interpretation. At 101
+nodes, amortized times were 0.0581/0.0598/0.0571 s for
+compute-first/balanced/accuracy-first. All three distribution scores were
+within one independent-reference sampling-floor score of the best observed
+score. Accuracy-first is therefore the selected default: it had the smallest
+mean error (0.00176), smallest variance error (0.0615), and lowest measured
+amortized runtime, despite retaining more dynamic modes. Its cheaper rank-5
+completion offsets that additional modal work.
+
+Scaling also exposes the present bottleneck. At 201 nodes all three pipelines
+used approximately 433--435 MiB peak RSS, while retained NumPy arrays ranged
+from 27.7 MiB for accuracy-first to 62.4 MiB for compute-first. The difference
+is temporary dense linear-algebra workspace and the time-indexed analytic
+completion construction, so modal rank reduction alone will not deliver a
+scalable implementation.
+
 ## Ordered next steps
 
-### 1. Benchmark the three selected completed operating points
-
-Measure setup time, per-trajectory time, amortized time, retained arrays, and
-peak RSS for the exact 35/20/rank-20, 50/10/rank-10, and 75/30/rank-5
-pipelines. Modal-update fraction omits the dense completion oracle, so this
-benchmark is required before choosing the default reduced pipeline.
-
-### 2. Add distribution-level error metrics
-
-Add one-dimensional Wasserstein or total-variation distance for selected
-node-count marginals and a sliced Wasserstein or energy distance for spatial
-vectors. KL divergence should not be the primary metric because Gaussian modal
-outputs and discrete multinomial counts do not share the same support.
-
-### 3. Replace the analytic oracle closure
+### 1. Replace the analytic oracle closure
 
 Develop a structured, sparse, local, or learned unresolved process that retains
 the persistent model's temporal accuracy without dense time-indexed conditional
 gains. Train/fit on one set of particle simulations and validate on held-out
 initial conditions, particle counts, domains, and diffusivities.
 
-### 4. Optimize and scale after the scientific target is fixed
+### 2. Validate the replacement out of sample
 
-Scaling is important, but it should not be the next standalone activity. First
-remove full-grid noise construction from the reduced path and reduce completion
+Fit on one training set, then validate on held-out impulse locations, particle
+counts, domain sizes, diffusivities, and grid resolutions. Require the new
+closure to remain within the multinomial sampling floor for moment and
+distribution metrics.
+
+### 3. Repeat scaling against both baselines
+
+Remove full-grid noise construction from the reduced path and reduce completion
 setup/storage. Then repeat timing and peak-RSS measurements at larger grids and
-longer trajectories. Compare against both aggregated multinomial and naive
-particle-tracking baselines. A reduced modal state is only valuable if the full
-pipeline wins at a declared accuracy.
+longer trajectories, comparing against both aggregated multinomial and naive
+particle tracking. A reduced modal state is only valuable if the complete
+pipeline wins at the declared accuracy.
 
 # Appendix A: mathematical framework
 
@@ -379,3 +389,34 @@ completion magnitude and simplex constraint ledger are recorded separately.
 Across the selected 500-trial operating points, the constraint eliminated all
 negative mass while changing mean, same-time covariance, and cross-time
 covariance errors only minimally.
+
+# Appendix D: distribution-level comparison and default selection
+
+For scalar node-count samples `X` and `Y`, the empirical Wasserstein-1 distance
+is the mean absolute separation of their quantile functions,
+
+```text
+W1(X,Y) = integral_0^1 |F_X^(-1)(q) - F_Y^(-1)(q)| dq.
+```
+
+The reported normalized value divides by the reference standard deviation
+(with a one-particle lower scale bound). Common-bin Jensen--Shannon divergence
+uses `M = (P + Q)/2` and
+
+```text
+JS(P,Q) = 0.5 KL(P || M) + 0.5 KL(Q || M).
+```
+
+Unlike raw KL between the original samples, this remains finite when the
+continuous completed output and discrete multinomial reference do not share
+support. For full spatial vectors, 64 random zero-sum unit directions `theta`
+are drawn and the normalized one-dimensional Wasserstein distances of
+`theta^T n` are averaged. Removing the constant direction prevents exact mass
+conservation from dominating the sliced metric.
+
+The default-selection score is the mean of normalized marginal and sliced
+Wasserstein distance. A pipeline is accuracy-eligible if its score lies within
+one independently measured multinomial-versus-multinomial sampling-floor score
+of the best pipeline. The eligible point with the smallest 100-run-amortized
+runtime is selected. Under the 500-trial study, all three points were eligible
+and accuracy-first was fastest.

@@ -10,15 +10,20 @@ from .baselines import (
 )
 from .benchmarking import (
     BENCHMARK_METHOD_NAMES,
+    SELECTED_OPERATING_POINTS,
     BenchmarkMethodName,
     DiffusionMethodBenchmark,
+    OperatingPoint,
+    OperatingPointBenchmark,
     RandomWalkBenchmark,
     benchmark_diffusion_methods,
+    benchmark_operating_points,
     benchmark_random_walks,
     deep_numpy_nbytes,
     estimate_random_walk_core_bytes,
     stable_diffusion_config,
     write_diffusion_method_benchmark_csv,
+    write_operating_point_benchmark_csv,
 )
 from .completion import (
     CompletionStep,
@@ -27,6 +32,12 @@ from .completion import (
     UnresolvedGaussianCompleter,
 )
 from .config import DiffusionConfig
+from .distribution_metrics import (
+    DistributionDiagnostics,
+    histogram_jensen_shannon_divergence,
+    summarize_distribution_ensemble,
+    wasserstein_distance_1d,
+)
 from .correlated_modal import (
     BankedCorrelatedModalDiffusion,
     BankedCorrelatedModalResult,
@@ -100,6 +111,7 @@ from .temporal import (
 
 __all__ = [
     "BENCHMARK_METHOD_NAMES",
+    "SELECTED_OPERATING_POINTS",
     "BenchmarkMethodName",
     "BankedCorrelatedModalDiffusion",
     "BankedCorrelatedModalResult",
@@ -113,6 +125,7 @@ __all__ = [
     "HandoffPrediction",
     "DiffusionConfig",
     "DiffusionMethodBenchmark",
+    "DistributionDiagnostics",
     "EigenMarkovDiffusion",
     "EigenMarkovResult",
     "EnsembleDiagnostics",
@@ -120,6 +133,8 @@ __all__ = [
     "IndependentModalDiffusion",
     "MODAL_MODEL_NAMES",
     "ModalModelName",
+    "OperatingPoint",
+    "OperatingPointBenchmark",
     "RandomWalkBenchmark",
     "READOUT_NAMES",
     "ReadoutName",
@@ -137,6 +152,7 @@ __all__ = [
     "UnresolvedGaussianCompleter",
     "ValidationMetrics",
     "benchmark_diffusion_methods",
+    "benchmark_operating_points",
     "benchmark_random_walks",
     "bootstrap_error_intervals",
     "continuous_expected_diffusion",
@@ -146,6 +162,7 @@ __all__ = [
     "empirical_covariance",
     "empirical_mean_cross_time_covariance",
     "estimate_random_walk_core_bytes",
+    "histogram_jensen_shannon_divergence",
     "multinomial_marginal_covariance",
     "multinomial_marginal_variance",
     "multinomial_mean_cross_time_covariance",
@@ -174,10 +191,13 @@ __all__ = [
     "stable_diffusion_config",
     "summarize",
     "summarize_ensemble",
+    "summarize_distribution_ensemble",
     "time_resolved_relative_l2_error",
     "trajectories_to_counts",
     "valid_time_origins",
     "write_diffusion_method_benchmark_csv",
+    "wasserstein_distance_1d",
+    "write_operating_point_benchmark_csv",
 ]
 
 __version__ = "0.10.0"
