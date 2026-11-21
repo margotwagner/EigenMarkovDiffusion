@@ -127,12 +127,14 @@ The available workflows are:
 | `study-fitted-closure` | Train and test a frozen trajectory-fitted sparse closure |
 | `benchmark-random-walk` | Compare particle and aggregated random-walk baselines |
 
-Two staged scaling drivers live under `examples/`:
+Three staged scaling drivers live under `examples/`:
 
 - `run_mode_scaling.py` compares proportional, fixed, spectral-decay, and exact
   mean-cutoff retained-mode policies.
 - `run_completion_scaling.py` screens completion rank and modal bandwidth after
   a retained-mode policy fails.
+- `run_adaptive_rank_scaling.py` selects rank from conditional-innovation
+  energy, validates across two domain lengths, and applies measured-cost gates.
 
 For example, compare the main modal formulations:
 
@@ -219,6 +221,14 @@ local analytic completion used for this scaling screen, fixed 75 modes becomes
 noninferior at 151 and 201 nodes when completion rank is increased to 20, but
 current setup time and retained storage are worse than the proportional rank-5
 baseline. See [mode scaling](docs/MODE_SCALING.md).
+
+The adaptive follow-up selects the minimum conditional-innovation rank that
+captures 90% of positive residual variance. Dense and physically scaled
+wide-local candidates pass fresh 250-run confirmation at 151/201 nodes on both
+length-4 and length-6 domains. Neither passes the setup, resident-storage, and
+trajectory cost intersection, so the predeclared 2,000-run promotion is
+intentionally not run. See
+[adaptive rank scaling](docs/ADAPTIVE_RANK_SCALING.md).
 
 The first cross-configuration fitted closure was also implemented and tested,
 but it did not pass the declared variance, covariance, temporal, or runtime

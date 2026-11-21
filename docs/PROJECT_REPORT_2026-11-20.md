@@ -9,9 +9,9 @@ Laplacian eigenbasis instead of by explicitly tracking particles. The project
 has progressed from the original independent-mode formulation to correlated
 modal dynamics, physically constrained banking, adaptive modal reduction, and
 Gaussian readouts for reconstructing unresolved modes. The package, command
-line workflows, analytic references, diagnostics, and 107 tests are complete
+line workflows, analytic references, diagnostics, and 114 tests are complete
 and passing. The initial five-part presentation suite has since expanded into
-the 18 experiments summarized below.
+the 19 experiments summarized below.
 
 The main scientific conclusion is that mean propagation is no longer the core
 problem. The full correlated model reproduces the multinomial reference's mean,
@@ -28,8 +28,10 @@ The baseline presentation outputs are in `outputs/presentation/`, and
 `run_presentation_results.sh` defines that pipeline. The current structured
 closure decision is in `outputs/structured_closure_hardened/`; the current
 resolution study is in `outputs/mode_scaling/`, with the independent finalist
-confirmation in `completion_finalist_r250_fresh/`. These later artifacts
-supersede the earlier local-closure selection. All 107 automated tests pass.
+confirmation in `completion_finalist_r250_fresh/`. The adaptive-rank selection,
+confirmation, and timing decision are in `outputs/adaptive_rank_scaling/`.
+These later artifacts supersede the earlier local-closure selection. All 114
+automated tests pass.
 
 Time-resolved errors, bootstrap uncertainty, and a 5,000-trial convergence
 study, predictive handoff/rank rule, completion-rank study, exact pipeline
@@ -51,6 +53,10 @@ A resolution-aware 101/151/201-node study is also complete. Plateauing retained
 mode rules fail with fixed completion rank 5. Fixed 75 retained modes becomes
 noninferior with completion rank 20, but setup, retained storage, and trajectory
 time are not better than the proportional rank-5 baseline.
+The conditional-innovation energy rule is now implemented and validated across
+the base length-4 and held-out length-6 domains. Its dense and wide-local
+candidates pass fresh 250-trial accuracy confirmation, but both fail the
+predeclared cost intersection, so neither advances to 2,000 trials.
 
 ## Completed work
 
@@ -77,6 +83,9 @@ time are not better than the proportional rank-5 baseline.
   noninferiority intervals, worst-time gates, and an explicit runtime gate.
 - Added resolution-aware proportional/fixed/spectral/mean-cutoff studies and a
   completion-rank/bandwidth follow-up at 101--201 nodes.
+- Added adaptive completion rank from captured conditional-innovation energy,
+  shared-CSR local gain storage, cross-domain selection/confirmation, and
+  repeated setup/storage/trajectory promotion gates.
 - Added a frozen trajectory-fitted sparse closure and tested it on unseen
   physics; it remains experimental because variance, covariance, temporal, and
   runtime gates failed.
@@ -121,9 +130,11 @@ wall-clock measurement and is not an ensemble trial.
 | 16. Hardened structured-closure rerun | Dense persistent closure versus every base-eligible local bandwidth, with matched projection directions and case-specific reference floors | 500 base trials; five held-outs with 250 trials each; 200 paired bootstrap resamples; 7 timing repeats; bandwidths 12 and 20 carried through held-out validation | Correct the permissive promotion logic and determine whether local memory savings survive a statistically fair temporal-transfer gate. |
 | 17. Resolution-aware mode scaling | Proportional retention, fixed 75, continuum spectral cutoff, and exact discrete post-handoff mean cutoff, each followed by local persistent completion | 101/151/201 nodes; 250 trials per policy/grid; two independent references per grid; 200 paired bootstrap resamples | Test whether retained dynamical modes can plateau with spatial refinement while analytic completion restores the unresolved stochastic field. |
 | 18. Completion-rank/bandwidth scaling | Fixed 75 retained modes with ranks 5/10/20 and bandwidths 12/20 against the proportional rank-5 baseline | 100-trial factorial screen with seed 20261120; rank-20/bandwidth-12 finalist independently repeated for 250 trials with seed 20261121; 7 timing repeats in physical-refinement and fixed-step regimes | Determine whether mode-count growth can be traded for unresolved completion rank and whether that trade produces an actual computational benefit. |
+| 19. Adaptive-rank cross-domain scaling | Fixed 75 retained modes with dense or local persistent completion; rank selected to capture 90% of conditional-innovation variance; proportional dense rank-5 baseline; length-4 and length-6 domains | 151/201 nodes; 100-trial selection with seed 20261130; fresh 250-trial confirmation with seed 20261201; 3 setup and 7 trajectory repeats with seed 20261202; local bandwidths 12/20 on length 4 scaled to 18/30 on length 6 | Replace an empirical fixed rank with a physics-based rule, test transfer across domain length, and require accuracy, setup, storage, and trajectory cost to pass before spending 2,000 trials. |
 
-The original presentation suite did not include the completion-rank and
-selected-pipeline studies; both have now been completed separately.
+The original presentation suite did not include the completion-rank,
+selected-pipeline, or adaptive-rank scaling studies; all have now been
+completed separately.
 
 ## Main results
 
@@ -182,6 +193,16 @@ selected-pipeline studies; both have now been completed separately.
     up, retains 16.4 MiB, and runs in 0.1429 s, versus 1.00 s, 6.8 MiB, and
     0.1403 s for proportional modes with rank 5. This is a scaling experiment,
     not a replacement for the dense production closure.
+11. **The physics-based rank rule is accurate, but the exact factorization is
+    not yet cheaper.** Capturing at least 90% of positive conditional-innovation
+    variance selects ranks 7/10/13 and 12/17/21 at 151/201 nodes on length 4,
+    and 5/7/9 and 8/11/14 on length 6. Dense adaptive and physically scaled
+    wide-local completion pass independent 250-trial confirmation in all four
+    case/grid combinations. At 201 nodes, dense adaptive uses 1.218--1.227 times
+    baseline setup and 1.833--1.926 times resident storage. Wide local reduces
+    storage to 0.435--0.553 times baseline but uses 4.270--6.606 times setup and
+    1.065--1.079 times trajectory runtime. Neither passes the cost gate, so the
+    2,000-trial promotion is intentionally not run.
 
 ## Completed follow-up
 
@@ -274,44 +295,60 @@ only about a 7% improvement over the previous 1.085 mean rather than the
 predeclared 20%. The six-case lockbox remains unopened, and no runtime tuning
 or promotion benchmark was performed for this rejected candidate.
 
+The adaptive-rank follow-up resolves the earlier empirical choice of rank 20.
+At each saved time it selects the smallest rank meeting a 90%-captured-energy
+criterion for the exact conditional innovation. A 100-trial selection retained
+dense adaptive completion and the physically scaled wide-local rule; the
+narrower local rule failed the length-6, 201-node temporal gate. Both retained
+candidates passed a disjoint-seed 250-trial confirmation at 151/201 nodes on
+lengths 4 and 6.
+
+The cost gate then produced the decisive negative result. Dense adaptive
+completion keeps trajectory time within 1%, but its setup and storage exceed
+the proportional rank-5 baseline. Shared CSR topology makes wide-local storage
+smaller, but full-spectrum factor construction remains expensive and its
+trajectory is 6--8% slower. With no candidate in the cross-domain promotion
+set, stopping before 2,000 trials is the predeclared outcome rather than an
+incomplete experiment.
+
 ## Ordered next steps
 
-### 1. Retain dense analytic persistent completion for production comparisons
+### 1. Implement an operator-based partial innovation eigensolver
 
-The hardened comparison rejects local bandwidths 12 and 20 only on long-domain
-lag covariance, but scientific transfer takes precedence over their memory
-savings. Keep local completion as an explicit research option.
+The energy rule is validated, but setup still forms and diagonalizes the full
+conditional innovation. Implement its covariance action without materializing
+the full block, compute only the leading spectrum needed to meet the tolerance,
+and validate captured energy, eigen-residuals, determinism, and fallback against
+the current exact factors.
 
-### 2. Derive and optimize the completion-rank scaling rule
+### 2. Optimize local gain construction without changing the physics gate
 
-Fixed 75 retained modes with local bandwidth-12 completion and rank 20 passes
-the 250-trial screen through 201 nodes, but its current setup/storage costs
-erase the reduced-dynamics benefit. Measure the conditional innovation
-spectrum across resolution, select rank from a predeclared captured-energy
-tolerance, and replace dense unresolved
-eigendecompositions with a matrix-free low-rank factor if the spectrum permits.
+Keep the physical bandwidth scaling that repaired the held-out length-6 case,
+but remove repeated dense work in local conditioning and profile packed-CSR
+trajectory operations. The measured targets are setup below baseline and no
+more than 5% trajectory overhead; do not loosen either margin.
 
-### 3. Repair long-domain temporal localization before promoting local closure
+### 3. Gate cost before spending another large ensemble
 
-Bandwidth 20 narrows the long-domain lag-error gap but still misses the gate.
-Test physically normalized neighborhoods or an explicit low-rank nonlocal
-temporal correction; do not merely loosen the temporal margin.
+Repeat the three-construction and seven-trajectory timing stage first. If the
+new partial factor differs numerically, also rerun the independent 250-trial
+accuracy confirmation. Run 2,000 trials only after a candidate passes accuracy,
+setup, resident-storage, and trajectory gates in both domain lengths.
 
-### 4. Preserve the lockbox for a genuinely different learned architecture
+### 4. Extend spatial scaling only after the implementation passes
+
+Then extend analytic rank and isolated timing beyond 201 nodes before adding
+Monte Carlo work. This directly tests whether fixed retained dynamics plus
+adaptive stochastic rank improves scaling as the spatial grid grows.
+
+### 5. Preserve the reference hierarchy and learned-model lockbox
 
 Do not inspect `configs/fitted_closure_lockbox.csv` through model evaluation.
 If the learned-closure effort continues, first specify a nonlinear conditional
 operator, analytic-teacher distillation, or another materially different model
 and pass configuration CV before opening the lockbox.
-
-### 5. Finish the scientific synthesis and presentation
-
-Present the negative fitted studies as a controlled result: innovation rank is
-adequate at the fitted anchors, exact-anchor behavior is substantially better,
-and transfer of the conditional operator is the unresolved learned-model
-limitation. Present dense completion as the trusted physics reference, the
-local closure as a memory/transfer tradeoff, and the fixed-mode/rank-20 result
-as accurate but not yet computationally advantageous.
+Dense analytic persistent completion remains the trusted production reference
+until a cheaper candidate passes all gates.
 
 # Appendix A: mathematical framework
 
@@ -806,3 +843,83 @@ fixed, so finer grids require more stable time steps. Fixed-step timing holds
 the number of transitions fixed at 100 and reports seconds per transition.
 Agreement between the regimes distinguishes spatial cost from the unavoidable
 increase in step count of an explicit diffusion discretization.
+
+# Appendix L: adaptive conditional-innovation rank and cross-domain gate
+
+## L1. Conditional innovation
+
+Let `r_t` be retained modal coordinates and `u_t` unresolved coordinates. At
+the completion start, conditioning the exact multinomial modal covariance gives
+
+```text
+K_0 = C_ur (C_rr + rho s_rr I)^(-1),
+S_0 = sym(C_uu - K_0 C_ru),
+u_0 = mu_(u|r) + F_0 z_0,          F_0 F_0^T approx S_0.
+```
+
+Here `s_rr = tr(C_rr) / dim(C_rr)` is the covariance scale, `rho` is the
+predeclared ridge, `sym(A) = (A + A^T) / 2`, and `z_0` is standard normal. At
+later saved times the persistent closure conditions `u_(t+1)` on the available
+persistent state
+`y_t = [u_t, r_t, r_(t+1)]`. With
+
+```text
+K_t = C_(u_next,y) (C_yy + rho s_yy I)^(-1),
+S_t = sym(C_(u_next,u_next) - K_t C_(y,u_next)),
+```
+
+the update is the conditional mean plus an innovation factor `F_t z_t`.
+This is a physics-derived Gaussian moment closure: `C` comes from the exact
+multinomial law, not a fitted trajectory model.
+
+## L2. Captured-energy rank rule
+
+Let the positive eigenvalues of `S_t` be ordered
+`lambda_(t,1) >= ... >= lambda_(t,q) > 0`. For a predeclared residual-variance
+tolerance `epsilon`, the selected rank is
+
+```text
+r_t(epsilon) = min {r :
+    sum_(i=1)^r lambda_(t,i) / sum_(i=1)^q lambda_(t,i)
+    >= 1 - epsilon}.
+```
+
+Experiment 19 uses `epsilon = 0.10`. The configured completion rank is only a
+hard upper bound; the reported minimum/median/maximum `r_t` values are the
+actual factor dimensions. If the cap prevents the inequality from being met,
+the tolerance diagnostic fails and the policy cannot be promoted. When no
+energy tolerance is configured, fixed-rank behavior is unchanged.
+
+## L3. Shared sparse topology
+
+For a local gain, each row uses the same allowed modal neighborhood at every
+saved transition. Its structure is therefore stored once as CSR row pointers
+`p` and column indices `j`, while only the values `g_t` vary with time:
+
+```text
+(K_t x)_i = sum_(ell=p_i)^(p_(i+1)-1) g_(t,ell) x_(j_ell).
+```
+
+This removes repeated padded indices and padded zero entries. It reduces
+resident storage without approximating the gain entries, but it does not by
+itself avoid construction of the dense conditional covariance or its full
+eigendecomposition. That remaining setup work explains the timing result.
+
+## L4. Cross-domain promotion rule
+
+Selection uses 100 trials and confirmation uses a disjoint seed with 250
+trials. A policy is accuracy-eligible only if it passes every noninferiority
+gate at 151 and 201 nodes in both the length-4 and length-6 cases. At the
+largest grid in each case, define ratios to the proportional dense rank-5
+baseline:
+
+```text
+R_setup = median candidate setup / median baseline setup,
+R_mem   = candidate resident arrays / baseline resident arrays,
+R_run   = median candidate trajectory / median baseline trajectory.
+```
+
+The cost gate requires `R_setup < 1`, `R_mem < 1`, and `R_run <= 1.05` in both
+domains. Only the intersection of the accuracy and cost sets may advance to
+2,000 trials. The observed intersection is empty, so stopping is part of the
+experimental design.

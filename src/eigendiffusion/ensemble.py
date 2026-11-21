@@ -229,6 +229,7 @@ def apply_readout_ensemble(
     completion_rank: int | None = None,
     completion_ridge: float = 1.0e-2,
     completion_bandwidth: int = 12,
+    completion_residual_variance_tolerance: float | None = None,
     seed: int = 0,
 ) -> EnsembleResult:
     """Apply an output-only readout independently to every ensemble run.
@@ -266,6 +267,9 @@ def apply_readout_ensemble(
             "completion_start_time": completion_start_time,
             "completion_rank": completion_rank,
             "ridge": completion_ridge,
+            "residual_variance_tolerance": (
+                completion_residual_variance_tolerance
+            ),
         }
         if completer_class is LocalPersistentUnresolvedGaussianCompleter:
             completer_kwargs["modal_bandwidth"] = completion_bandwidth
@@ -313,6 +317,9 @@ def apply_readout_ensemble(
             completion_rank=completion_rank,
             completion_ridge=completion_ridge,
             completion_bandwidth=completion_bandwidth,
+            completion_residual_variance_tolerance=(
+                completion_residual_variance_tolerance
+            ),
             rng=rng,
         )
         processed.append(result.counts)
@@ -321,6 +328,27 @@ def apply_readout_ensemble(
         )
 
     auxiliary = {} if ensemble.auxiliary is None else dict(ensemble.auxiliary)
+    if completer is not None:
+        factor_summary = completer.factor_diagnostics_summary()
+        auxiliary.update(
+            {
+                "completion_selected_rank_min": int(
+                    factor_summary["selected_rank_min"]
+                ),
+                "completion_selected_rank_median": float(
+                    factor_summary["selected_rank_median"]
+                ),
+                "completion_selected_rank_max": int(
+                    factor_summary["selected_rank_max"]
+                ),
+                "completion_minimum_captured_variance_fraction": float(
+                    factor_summary["minimum_captured_variance_fraction"]
+                ),
+                "completion_tolerance_met": bool(
+                    factor_summary["tolerance_met"]
+                ),
+            }
+        )
     stacked_residual = np.stack(residual_l1_fraction).astype(float, copy=False)
     auxiliary["readout_residual_l1_fraction"] = stacked_residual
     if readout in completion_constraints:

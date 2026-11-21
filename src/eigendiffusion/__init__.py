@@ -28,6 +28,7 @@ from .benchmarking import (
     write_operating_point_benchmark_csv,
 )
 from .completion import (
+    CompletionFactorDiagnostics,
     CompletionStep,
     LocalPersistentUnresolvedGaussianCompleter,
     PersistentTransitionStep,
@@ -94,6 +95,8 @@ from .mode_scaling import (
     DEFAULT_PREDICTOR_CANDIDATE_MODES,
     MODE_SCALING_ACCEPTANCE_METRICS,
     AnalyticModeScalingRecord,
+    CompletionClosure,
+    CompletionPolicySettings,
     ModeSelectionPolicy,
     ModeTimingRecord,
     ResolutionModeStudySpec,
@@ -105,6 +108,18 @@ from .mode_scaling import (
     run_accuracy_screen,
     run_resolution_mode_study,
     spectral_decay_mode_count,
+)
+from .rank_scaling import (
+    BASELINE_POLICY,
+    FIXED_DENSE_POLICY,
+    FIXED_LOCAL_B12_POLICY,
+    FIXED_LOCAL_B20_POLICY,
+    CrossCaseRankScalingSpec,
+    RankScalingPhysicalCase,
+    evaluate_timing_cost_gates,
+    intersect_case_eligibility,
+    policies_for_case,
+    run_cross_case_rank_scaling,
 )
 from .readouts import (
     READOUT_NAMES,
@@ -248,6 +263,19 @@ __all__ = [
     "write_diffusion_method_benchmark_csv",
     "wasserstein_distance_1d",
     "write_operating_point_benchmark_csv",
+    "BASELINE_POLICY",
+    "CompletionClosure",
+    "CompletionFactorDiagnostics",
+    "CompletionPolicySettings",
+    "CrossCaseRankScalingSpec",
+    "FIXED_DENSE_POLICY",
+    "FIXED_LOCAL_B12_POLICY",
+    "FIXED_LOCAL_B20_POLICY",
+    "RankScalingPhysicalCase",
+    "evaluate_timing_cost_gates",
+    "intersect_case_eligibility",
+    "policies_for_case",
+    "run_cross_case_rank_scaling",
 ]
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"

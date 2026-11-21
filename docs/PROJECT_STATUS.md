@@ -29,6 +29,9 @@ integer particle counts, and setup is the current performance bottleneck.
   trajectory-runtime gate.
 - Resolution-aware mode scaling through 201 nodes and a completion-rank versus
   retained-mode trade study.
+- A conditional-innovation energy rank rule, shared-CSR local gain storage,
+  cross-domain 100-run selection, fresh 250-run confirmation, and isolated
+  setup/storage/trajectory cost gates.
 - Frozen fitted, anchor-conditioned, persistent-innovation, and
   physics-conditioned learned-closure studies with an unopened lockbox.
 
@@ -50,20 +53,40 @@ of setup, 16.4 MiB of retained arrays, and 0.1429 s per trajectory, compared
 with 1.00 s, 6.8 MiB, and 0.1403 s for proportional retention with rank 5. It
 is scientifically accurate but not a scaling win.
 
+The adaptive follow-up makes the completion dimension physics-based. The
+smallest factor capturing 90% of positive conditional-innovation variance
+selects ranks 7/10/13 and 12/17/21 (minimum/median/maximum) at 151/201 nodes on
+the length-4 domain, and 5/7/9 and 8/11/14 on length 6. Dense adaptive and
+physically scaled wide-local completion both pass the fresh 250-run accuracy
+gate in all four case/grid combinations. The narrower local rule fails the
+length-6, 201-node temporal gate.
+
+Neither confirmed candidate passes the isolated cost gate. At the 201-node
+physical-refinement points, dense adaptive setup is 1.218--1.227 times the
+baseline and resident storage is 1.833--1.926 times the baseline, although
+trajectory time is essentially unchanged. Wide-local completion reduces
+resident storage to 0.435--0.553 times baseline, but setup rises to
+4.270--6.606 times baseline and trajectory time to 1.065--1.079 times baseline.
+The promotion set is empty, so no 2,000-run headline study is justified.
+
 ## Ordered next steps
 
-1. Derive a physics-based completion-rank rule from the conditional innovation
-   spectrum across resolution, using a predeclared captured-energy tolerance.
-2. Implement a matrix-free or streaming low-rank innovation factor so a fixed
-   retained-mode model reduces setup and storage as well as state dimension.
-3. Repeat the 250-run accuracy gate and seven-or-more-repeat timing gate for
-   that candidate. Advance to 2,000 trials only if it is accurate and cheaper.
-4. Repair the local closure's long-domain temporal error using physically
-   normalized neighborhoods or a low-rank nonlocal correction; do not relax
-   the comparison margin.
-5. Keep the learned-model lockbox closed unless a materially different
+1. Replace the full conditional-innovation eigendecomposition with a validated
+   operator-based partial eigensolver. Compare its factors with the exact
+   spectrum, including captured energy and Ritz residuals, before benchmarking.
+2. Optimize local gain construction separately. Preserve the physically scaled
+   bandwidth that repaired long-domain accuracy, and target the measured setup
+   and trajectory bottlenecks without changing the statistical margins.
+3. Rerun the three-setup/seven-trajectory cost gate first. If the factor changes
+   numerically, repeat the fresh 250-run accuracy gate as well. Advance to 2,000
+   trials only when one candidate is accurate and cheaper in both domains.
+4. After that gate passes, extend analytic rank and timing scaling beyond 201
+   nodes before spending additional Monte Carlo trials; this tests whether the
+   fixed-dynamics benefit persists under further spatial refinement.
+5. Keep dense analytic completion as the trusted production reference, and
+   keep the learned-model lockbox closed unless a materially different
    architecture first passes whole-configuration cross-validation.
 
 The detailed experiment inventory, results, and theory are in
 `docs/PROJECT_REPORT_2026-11-20.md`; the scaling workflow is documented in
-`docs/MODE_SCALING.md`.
+`docs/MODE_SCALING.md` and `docs/ADAPTIVE_RANK_SCALING.md`.

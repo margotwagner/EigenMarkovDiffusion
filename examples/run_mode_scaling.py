@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runs", type=int)
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--timing-repeats", type=int, default=7)
+    parser.add_argument("--setup-repeats", type=int, default=3)
     parser.add_argument("--bootstrap-resamples", type=int, default=200)
     parser.add_argument("--bootstrap-blocks", type=int, default=20)
     parser.add_argument("--confidence-level", type=float, default=0.95)
@@ -50,6 +51,7 @@ def main() -> None:
     spec = ResolutionModeStudySpec(
         node_counts=tuple(args.nodes),
         timing_repeats=args.timing_repeats,
+        setup_repeats=args.setup_repeats,
         comparison_bootstrap_resamples=args.bootstrap_resamples,
         comparison_bootstrap_blocks=args.bootstrap_blocks,
         comparison_confidence_level=args.confidence_level,

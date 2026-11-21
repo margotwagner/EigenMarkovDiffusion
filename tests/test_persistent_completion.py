@@ -3,6 +3,9 @@ import numpy as np
 from eigendiffusion.completion import (
     LocalPersistentUnresolvedGaussianCompleter,
     PersistentUnresolvedGaussianCompleter,
+    SparseRowGain,
+    SparseRowTopology,
+    _GaussianCompletionBase,
     _modal_multinomial_covariance_block,
     _modal_multinomial_cross_covariance_block,
 )
@@ -204,6 +207,84 @@ def test_persistent_completion_rank_is_capped() -> None:
     assert completer.completion_rank == 1
 
 
+def test_captured_variance_rank_is_minimal_and_reports_cap_failure() -> None:
+    config = DiffusionConfig(
+        n_particles=100,
+        n_nodes=4,
+        n_steps=2,
+        impulse_index=1,
+    )
+    covariance = np.diag([9.0, 4.0, 1.0])
+    adaptive = _GaussianCompletionBase(
+        config,
+        retained_modes=1,
+        completion_rank=3,
+        residual_variance_tolerance=0.2,
+    )
+    factor, diagnostics = adaptive._low_rank_psd_factor_with_diagnostics(
+        covariance
+    )
+    assert factor.shape == (3, 2)
+    assert diagnostics.selected_rank == 2
+    assert np.isclose(diagnostics.captured_variance_fraction, 13.0 / 14.0)
+    assert diagnostics.tolerance_met
+    assert 9.0 / 14.0 < 0.8 <= 13.0 / 14.0
+
+    capped = _GaussianCompletionBase(
+        config,
+        retained_modes=1,
+        completion_rank=1,
+        residual_variance_tolerance=0.2,
+    )
+    _, capped_diagnostics = capped._low_rank_psd_factor_with_diagnostics(
+        covariance
+    )
+    assert capped_diagnostics.selected_rank == 1
+    assert not capped_diagnostics.tolerance_met
+
+    fixed = _GaussianCompletionBase(
+        config,
+        retained_modes=1,
+        completion_rank=2,
+    )
+    fixed_factor, fixed_diagnostics = fixed._low_rank_psd_factor_with_diagnostics(
+        covariance
+    )
+    np.testing.assert_allclose(
+        fixed_factor @ fixed_factor.T,
+        np.diag([9.0, 4.0, 0.0]),
+        atol=1.0e-12,
+    )
+    assert fixed_diagnostics.selected_rank == 2
+    assert fixed_diagnostics.tolerance_met
+
+
+def test_sparse_row_gain_csr_products_match_dense_matrix() -> None:
+    topology = SparseRowTopology(
+        indptr=np.array([0, 2, 2, 3], dtype=np.int64),
+        indices=np.array([0, 2, 1], dtype=np.int64),
+        row_indices=np.array([0, 0, 2], dtype=np.int64),
+        n_columns=3,
+    )
+    gain = SparseRowGain(
+        topology=topology,
+        values=np.array([2.0, -1.0, 3.0]),
+    )
+    dense = np.array(
+        [
+            [2.0, 0.0, -1.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0],
+        ]
+    )
+    vector = np.array([1.0, 2.0, 4.0])
+    matrix = np.column_stack([vector, 2.0 * vector])
+    np.testing.assert_array_equal(gain.to_dense(), dense)
+    np.testing.assert_allclose(gain.matvec(vector), dense @ vector)
+    np.testing.assert_allclose(gain.matmat(matrix), dense @ matrix)
+    np.testing.assert_allclose(gain.rmatvec(vector), dense.T @ vector)
+
+
 def test_restricted_modal_covariance_blocks_match_dense_formulas() -> None:
     config = DiffusionConfig(
         n_particles=200,
@@ -381,6 +462,41 @@ def test_local_restricted_parameters_match_legacy_full_assembly() -> None:
         atol=1.0e-10,
         rtol=1.0e-10,
     )
+
+
+def test_local_transition_gains_share_packed_csr_topology() -> None:
+    config = DiffusionConfig(
+        n_particles=200,
+        n_nodes=15,
+        n_steps=10,
+        impulse_index=7,
+        dt=1.0,
+        length=4.0,
+        diffusion_coefficient=2.20e-4,
+    )
+    completer = LocalPersistentUnresolvedGaussianCompleter(
+        config,
+        retained_modes=7,
+        completion_start_time=2.0,
+        completion_rank=3,
+        modal_bandwidth=2,
+    )
+    steps = [step for step in completer._transition_steps if step is not None]
+    assert len(steps) > 1
+    topology = steps[0].conditional_gain.topology
+    assert all(step.conditional_gain.topology is topology for step in steps)
+    assert all(
+        step.conditional_gain.values.size == topology.indices.size for step in steps
+    )
+    padded_size = completer.omitted_modes * int(np.max(topology.counts))
+    assert topology.indices.size < padded_size
+
+    summary = completer.factor_diagnostics_summary()
+    assert summary["factor_count"] == len(steps) + 1
+    assert summary["selected_rank_min"] <= summary["selected_rank_median"]
+    assert summary["selected_rank_median"] <= summary["selected_rank_max"]
+    assert 0.0 <= summary["minimum_captured_variance_fraction"] <= 1.0
+    assert summary["tolerance_met"] is True
 
 
 def test_local_persistent_matches_dense_at_full_bandwidth() -> None:

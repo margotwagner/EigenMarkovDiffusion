@@ -37,7 +37,10 @@ from typing import Literal, Sequence
 import numpy as np
 
 from .benchmarking import deep_numpy_nbytes, stable_diffusion_config
-from .completion import LocalPersistentUnresolvedGaussianCompleter
+from .completion import (
+    LocalPersistentUnresolvedGaussianCompleter,
+    PersistentUnresolvedGaussianCompleter,
+)
 from .config import DiffusionConfig
 from .correlated_modal import HandoffCorrelatedModalDiffusion
 from .distribution_metrics import summarize_distribution_ensemble
@@ -70,6 +73,7 @@ ModePolicyKind = Literal[
 ]
 StudyStage = Literal["analytic", "screening", "final"]
 TimingRegime = Literal["physical_refinement", "fixed_steps"]
+CompletionClosure = Literal["local_persistent", "dense_persistent"]
 
 MODE_SCALING_ACCEPTANCE_METRICS = (
     "mean_relative_l2_error",
@@ -155,6 +159,8 @@ class ModeSelectionPolicy:
     predictor_covariance_tolerance: float = 2.0e-1
     completion_rank: int | None = None
     modal_bandwidth: int | None = None
+    completion_closure: CompletionClosure = "local_persistent"
+    completion_residual_variance_tolerance: float | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -185,6 +191,15 @@ class ModeSelectionPolicy:
             raise ValueError("policy completion_rank must be positive")
         if self.modal_bandwidth is not None and self.modal_bandwidth < 0:
             raise ValueError("policy modal_bandwidth must be nonnegative")
+        if self.completion_closure not in {"local_persistent", "dense_persistent"}:
+            raise ValueError("unknown completion closure")
+        if (
+            self.completion_residual_variance_tolerance is not None
+            and not 0.0 < self.completion_residual_variance_tolerance < 1.0
+        ):
+            raise ValueError(
+                "completion_residual_variance_tolerance must lie in (0, 1)"
+            )
 
 
 DEFAULT_MODE_POLICIES: tuple[ModeSelectionPolicy, ...] = (
@@ -242,6 +257,7 @@ class ResolutionModeStudySpec:
     comparison_confidence_level: float = 0.95
     fixed_step_count: int = 101
     timing_repeats: int = 7
+    setup_repeats: int = 3
     seed: int = 20261120
 
     def __post_init__(self) -> None:
@@ -287,7 +303,11 @@ class ResolutionModeStudySpec:
             raise ValueError("comparison bootstrap blocks must exceed one")
         if not 0.0 < self.comparison_confidence_level < 1.0:
             raise ValueError("comparison confidence level must lie in (0, 1)")
-        if self.fixed_step_count < 2 or self.timing_repeats <= 0:
+        if (
+            self.fixed_step_count < 2
+            or self.timing_repeats <= 0
+            or self.setup_repeats <= 0
+        ):
             raise ValueError("timing settings must be positive")
 
 
@@ -311,8 +331,18 @@ class AnalyticModeScalingRecord:
     predicted_covariance_relative_frobenius_error: float
     modal_update_fraction_of_full: float
 
-    def as_dict(self) -> dict[str, str | int | float]:
+    def as_dict(self) -> dict[str, str | int | float | bool | None]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionPolicySettings:
+    """Resolved completion configuration for one policy and grid."""
+
+    rank_cap: int
+    modal_bandwidth: int
+    closure: CompletionClosure
+    residual_variance_tolerance: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,15 +359,25 @@ class ModeTimingRecord:
     final_modes: int
     completion_rank: int
     modal_bandwidth: int
+    completion_closure: CompletionClosure
+    completion_residual_variance_tolerance: float | None
+    selected_rank_min: int
+    selected_rank_median: float
+    selected_rank_max: int
+    minimum_captured_variance_fraction: float
+    completion_tolerance_met: bool
     repeats: int
+    setup_repeats: int
     setup_seconds: float
+    mean_setup_seconds: float
+    std_setup_seconds: float
     median_run_seconds: float
     mean_run_seconds: float
     std_run_seconds: float
     median_seconds_per_transition: float
     resident_array_bytes: int
 
-    def as_dict(self) -> dict[str, str | int | float]:
+    def as_dict(self) -> dict[str, str | int | float | bool | None]:
         row = asdict(self)
         row["resident_array_megabytes"] = self.resident_array_bytes / 1024**2
         return row
@@ -700,21 +740,26 @@ def _evaluate_ensemble(
 def _policy_completion_settings(
     spec: ResolutionModeStudySpec,
     candidate: AnalyticModeScalingRecord,
-) -> tuple[int, int]:
+) -> CompletionPolicySettings:
     policy = next(policy for policy in spec.policies if policy.name == candidate.policy)
-    requested_rank = (
-        spec.completion_rank
-        if policy.completion_rank is None
-        else policy.completion_rank
-    )
+    if policy.completion_rank is not None:
+        requested_rank = policy.completion_rank
+    elif policy.completion_residual_variance_tolerance is not None:
+        requested_rank = candidate.n_nodes - candidate.final_modes
+    else:
+        requested_rank = spec.completion_rank
     bandwidth = (
         spec.modal_bandwidth
         if policy.modal_bandwidth is None
         else policy.modal_bandwidth
     )
-    return (
-        min(requested_rank, candidate.n_nodes - candidate.final_modes),
-        bandwidth,
+    return CompletionPolicySettings(
+        rank_cap=min(requested_rank, candidate.n_nodes - candidate.final_modes),
+        modal_bandwidth=bandwidth,
+        closure=policy.completion_closure,
+        residual_variance_tolerance=(
+            policy.completion_residual_variance_tolerance
+        ),
     )
 
 
@@ -826,11 +871,11 @@ def run_accuracy_screen(
             candidate: AnalyticModeScalingRecord,
             raw,
         ) -> tuple[np.ndarray, dict[str, int | float]]:
-            completion_rank, modal_bandwidth = _policy_completion_settings(
+            settings = _policy_completion_settings(
                 spec,
                 candidate,
             )
-            if completion_rank == 0:
+            if settings.rank_cap == 0:
                 completed = apply_readout_ensemble(
                     raw,
                     config,
@@ -838,15 +883,23 @@ def run_accuracy_screen(
                     seed=spec.seed + 50_000 + node_index,
                 )
             else:
+                readout = (
+                    "local_persistent_unresolved_completion_simplex_bank"
+                    if settings.closure == "local_persistent"
+                    else "persistent_unresolved_completion_simplex_bank"
+                )
                 completed = apply_readout_ensemble(
                     raw,
                     config,
-                    readout="local_persistent_unresolved_completion_simplex_bank",
+                    readout=readout,
                     retained_modes=candidate.final_modes,
                     completion_start_time=candidate.handoff_time,
-                    completion_rank=completion_rank,
+                    completion_rank=settings.rank_cap,
                     completion_ridge=spec.completion_ridge,
-                    completion_bandwidth=modal_bandwidth,
+                    completion_bandwidth=settings.modal_bandwidth,
+                    completion_residual_variance_tolerance=(
+                        settings.residual_variance_tolerance
+                    ),
                     seed=spec.seed + 50_000 + node_index,
                 )
             metrics = _evaluate_ensemble(
@@ -861,6 +914,29 @@ def run_accuracy_screen(
                 exact_covariance=exact_covariance,
                 exact_cross_covariance=exact_cross,
             )
+            auxiliary = {} if completed.auxiliary is None else completed.auxiliary
+            metrics.update(
+                {
+                    "selected_rank_min": int(
+                        auxiliary.get("completion_selected_rank_min", 0)
+                    ),
+                    "selected_rank_median": float(
+                        auxiliary.get("completion_selected_rank_median", 0.0)
+                    ),
+                    "selected_rank_max": int(
+                        auxiliary.get("completion_selected_rank_max", 0)
+                    ),
+                    "minimum_captured_variance_fraction": float(
+                        auxiliary.get(
+                            "completion_minimum_captured_variance_fraction",
+                            1.0,
+                        )
+                    ),
+                    "completion_tolerance_met": bool(
+                        auxiliary.get("completion_tolerance_met", True)
+                    ),
+                }
+            )
             completed_runs = completed.runs
             del completed
             gc.collect()
@@ -872,24 +948,28 @@ def run_accuracy_screen(
             baseline_candidate,
             active_raw,
         )
-        baseline_rank, baseline_bandwidth = _policy_completion_settings(
+        baseline_settings = _policy_completion_settings(
             spec,
             baseline_candidate,
         )
         baseline_configuration = (
             baseline_candidate.final_modes,
-            baseline_rank,
-            baseline_bandwidth,
+            baseline_settings.rank_cap,
+            baseline_settings.modal_bandwidth,
+            baseline_settings.closure,
+            baseline_settings.residual_variance_tolerance,
         )
         for candidate_index, candidate in enumerate(ordered_candidates):
-            completion_rank, modal_bandwidth = _policy_completion_settings(
+            settings = _policy_completion_settings(
                 spec,
                 candidate,
             )
             candidate_configuration = (
                 candidate.final_modes,
-                completion_rank,
-                modal_bandwidth,
+                settings.rank_cap,
+                settings.modal_bandwidth,
+                settings.closure,
+                settings.residual_variance_tolerance,
             )
             if candidate_configuration == baseline_configuration:
                 metrics = dict(baseline_metrics)
@@ -946,8 +1026,12 @@ def run_accuracy_screen(
                     "handoff_time": candidate.handoff_time,
                     "final_modes": candidate.final_modes,
                     "retained_fraction": candidate.final_modes / config.n_nodes,
-                    "completion_rank": completion_rank,
-                    "modal_bandwidth": modal_bandwidth,
+                    "completion_rank": settings.rank_cap,
+                    "modal_bandwidth": settings.modal_bandwidth,
+                    "completion_closure": settings.closure,
+                    "completion_residual_variance_tolerance": (
+                        settings.residual_variance_tolerance
+                    ),
                     **comparison_metrics,
                 }
             )
@@ -967,37 +1051,57 @@ def _benchmark_one_policy(
 ) -> ModeTimingRecord:
     handoff_time = float(config.times[-1] * spec.handoff_fraction)
     policy_spec = next(item for item in spec.policies if item.name == policy)
-    requested_rank = (
-        spec.completion_rank
-        if policy_spec.completion_rank is None
-        else policy_spec.completion_rank
-    )
+    if policy_spec.completion_rank is not None:
+        requested_rank = policy_spec.completion_rank
+    elif policy_spec.completion_residual_variance_tolerance is not None:
+        requested_rank = config.n_nodes - final_modes
+    else:
+        requested_rank = spec.completion_rank
     completion_rank = min(requested_rank, config.n_nodes - final_modes)
     modal_bandwidth = (
         spec.modal_bandwidth
         if policy_spec.modal_bandwidth is None
         else policy_spec.modal_bandwidth
     )
-    start = perf_counter()
-    simulator = HandoffCorrelatedModalDiffusion(
-        config=config,
-        initial_n_modes=config.n_nodes,
-        final_n_modes=final_modes,
-        handoff_time=handoff_time,
-    )
-    completer = (
-        None
-        if completion_rank == 0
-        else LocalPersistentUnresolvedGaussianCompleter(
-            config,
-            retained_modes=final_modes,
-            completion_start_time=handoff_time,
-            completion_rank=completion_rank,
-            modal_bandwidth=modal_bandwidth,
-            ridge=spec.completion_ridge,
+    def build_pipeline():
+        simulator = HandoffCorrelatedModalDiffusion(
+            config=config,
+            initial_n_modes=config.n_nodes,
+            final_n_modes=final_modes,
+            handoff_time=handoff_time,
         )
-    )
-    setup_seconds = perf_counter() - start
+        completer = None
+        if completion_rank:
+            completer_class = (
+                LocalPersistentUnresolvedGaussianCompleter
+                if policy_spec.completion_closure == "local_persistent"
+                else PersistentUnresolvedGaussianCompleter
+            )
+            completer_kwargs: dict[str, object] = {
+                "retained_modes": final_modes,
+                "completion_start_time": handoff_time,
+                "completion_rank": completion_rank,
+                "ridge": spec.completion_ridge,
+                "residual_variance_tolerance": (
+                    policy_spec.completion_residual_variance_tolerance
+                ),
+            }
+            if completer_class is LocalPersistentUnresolvedGaussianCompleter:
+                completer_kwargs["modal_bandwidth"] = modal_bandwidth
+            completer = completer_class(config, **completer_kwargs)
+        return simulator, completer
+
+    setup_timings: list[float] = []
+    simulator = None
+    completer = None
+    for _ in range(spec.setup_repeats):
+        start = perf_counter()
+        new_simulator, new_completer = build_pipeline()
+        setup_timings.append(perf_counter() - start)
+        simulator, completer = new_simulator, new_completer
+    assert simulator is not None
+    setup_values = np.asarray(setup_timings, dtype=float)
+    setup_seconds = float(np.median(setup_values))
     resident_bytes = deep_numpy_nbytes((simulator, completer))
 
     timings: list[float] = []
@@ -1020,6 +1124,17 @@ def _benchmark_one_policy(
             raise RuntimeError("timed completed output failed nonnegativity")
         timings.append(elapsed)
     values = np.asarray(timings, dtype=float)
+    factor_summary = (
+        {
+            "selected_rank_min": 0,
+            "selected_rank_median": 0.0,
+            "selected_rank_max": 0,
+            "minimum_captured_variance_fraction": 1.0,
+            "tolerance_met": True,
+        }
+        if completer is None
+        else completer.factor_diagnostics_summary()
+    )
     return ModeTimingRecord(
         policy=policy,
         regime=regime,
@@ -1031,8 +1146,22 @@ def _benchmark_one_policy(
         final_modes=final_modes,
         completion_rank=completion_rank,
         modal_bandwidth=modal_bandwidth,
+        completion_closure=policy_spec.completion_closure,
+        completion_residual_variance_tolerance=(
+            policy_spec.completion_residual_variance_tolerance
+        ),
+        selected_rank_min=int(factor_summary["selected_rank_min"]),
+        selected_rank_median=float(factor_summary["selected_rank_median"]),
+        selected_rank_max=int(factor_summary["selected_rank_max"]),
+        minimum_captured_variance_fraction=float(
+            factor_summary["minimum_captured_variance_fraction"]
+        ),
+        completion_tolerance_met=bool(factor_summary["tolerance_met"]),
         repeats=spec.timing_repeats,
+        setup_repeats=spec.setup_repeats,
         setup_seconds=setup_seconds,
+        mean_setup_seconds=float(np.mean(setup_values)),
+        std_setup_seconds=float(np.std(setup_values, ddof=0)),
         median_run_seconds=float(np.median(values)),
         mean_run_seconds=float(np.mean(values)),
         std_run_seconds=float(np.std(values, ddof=0)),
@@ -1063,10 +1192,19 @@ def benchmark_mode_scaling(
                 if regime == "physical_refinement"
                 else _fixed_step_config(spec, n_nodes)
             )
-            timing_cache: dict[tuple[int, int, int], ModeTimingRecord] = {}
+            timing_cache: dict[
+                tuple[int, int, int, CompletionClosure, float | None],
+                ModeTimingRecord,
+            ] = {}
             for policy_index, candidate in enumerate(candidates):
-                rank, bandwidth = _policy_completion_settings(spec, candidate)
-                configuration = (candidate.final_modes, rank, bandwidth)
+                settings = _policy_completion_settings(spec, candidate)
+                configuration = (
+                    candidate.final_modes,
+                    settings.rank_cap,
+                    settings.modal_bandwidth,
+                    settings.closure,
+                    settings.residual_variance_tolerance,
+                )
                 if configuration not in timing_cache:
                     timing_cache[configuration] = _benchmark_one_policy(
                         spec,

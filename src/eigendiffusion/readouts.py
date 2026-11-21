@@ -298,6 +298,7 @@ def unresolved_gaussian_completion_readout(
     completion_start_time: float = 0.0,
     completion_rank: int | None = None,
     completion_ridge: float = 1.0e-2,
+    completion_residual_variance_tolerance: float | None = None,
     rng: np.random.Generator | None = None,
 ) -> ReadoutResult:
     """Restore omitted-mode same-time moments with analytic Gaussian sampling.
@@ -321,6 +322,7 @@ def unresolved_gaussian_completion_readout(
         completion_start_time=completion_start_time,
         completion_rank=completion_rank,
         ridge=completion_ridge,
+        residual_variance_tolerance=completion_residual_variance_tolerance,
     )
     completed, additions = completer.complete(values, rng=rng)
     return ReadoutResult(
@@ -340,6 +342,7 @@ def persistent_unresolved_completion_readout(
     completion_start_time: float = 0.0,
     completion_rank: int | None = None,
     completion_ridge: float = 1.0e-2,
+    completion_residual_variance_tolerance: float | None = None,
     rng: np.random.Generator | None = None,
 ) -> ReadoutResult:
     """Restore omitted modes with a persistent analytic Gaussian state.
@@ -360,6 +363,7 @@ def persistent_unresolved_completion_readout(
         completion_start_time=completion_start_time,
         completion_rank=completion_rank,
         ridge=completion_ridge,
+        residual_variance_tolerance=completion_residual_variance_tolerance,
     )
     completed, additions = completer.complete(values, rng=rng)
     return ReadoutResult(
@@ -381,6 +385,7 @@ def apply_readout(
     completion_rank: int | None = None,
     completion_ridge: float = 1.0e-2,
     completion_bandwidth: int = 12,
+    completion_residual_variance_tolerance: float | None = None,
     rng: np.random.Generator | None = None,
 ) -> ReadoutResult:
     """Apply one named output readout to a modal spatial trajectory."""
@@ -410,6 +415,9 @@ def apply_readout(
             completion_start_time=completion_start_time,
             completion_rank=completion_rank,
             completion_ridge=completion_ridge,
+            completion_residual_variance_tolerance=(
+                completion_residual_variance_tolerance
+            ),
             rng=rng,
         )
     if readout == "persistent_unresolved_completion":
@@ -425,6 +433,9 @@ def apply_readout(
             completion_start_time=completion_start_time,
             completion_rank=completion_rank,
             completion_ridge=completion_ridge,
+            completion_residual_variance_tolerance=(
+                completion_residual_variance_tolerance
+            ),
             rng=rng,
         )
     if readout in {
@@ -441,6 +452,9 @@ def apply_readout(
             completion_rank=completion_rank,
             modal_bandwidth=completion_bandwidth,
             ridge=completion_ridge,
+            residual_variance_tolerance=(
+                completion_residual_variance_tolerance
+            ),
         )
         completed, additions = completer.complete(values, rng=rng)
         if readout.endswith("_simplex_bank"):
@@ -476,6 +490,9 @@ def apply_readout(
             completion_start_time=completion_start_time,
             completion_rank=completion_rank,
             completion_ridge=completion_ridge,
+            completion_residual_variance_tolerance=(
+                completion_residual_variance_tolerance
+            ),
             rng=rng,
         )
         constrained = simplex_bank_readout(completed.counts, total_mass)

@@ -110,6 +110,15 @@ def _modal_multinomial_cross_covariance_block(
 
 
 @dataclass(frozen=True, slots=True)
+class CompletionFactorDiagnostics:
+    """Captured-variance diagnostics for one conditional innovation factor."""
+
+    selected_rank: int
+    captured_variance_fraction: float
+    tolerance_met: bool
+
+
+@dataclass(frozen=True, slots=True)
 class CompletionStep:
     """Precomputed same-time Gaussian conditional parameters."""
 
@@ -117,6 +126,7 @@ class CompletionStep:
     omitted_mean: FloatArray
     conditional_gain: FloatArray
     conditional_factor: FloatArray
+    factor_diagnostics: CompletionFactorDiagnostics
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,31 +141,100 @@ class PersistentTransitionStep:
     target_mean: FloatArray
     conditional_gain: FloatArray
     conditional_factor: FloatArray
+    factor_diagnostics: CompletionFactorDiagnostics
+
+
+@dataclass(frozen=True, slots=True)
+class SparseRowTopology:
+    """Shared compressed-row topology for a family of sparse gains."""
+
+    indptr: NDArray[np.int64]
+    indices: NDArray[np.int64]
+    row_indices: NDArray[np.int64]
+    n_columns: int
+
+    @property
+    def n_rows(self) -> int:
+        return self.indptr.size - 1
+
+    @property
+    def counts(self) -> NDArray[np.int64]:
+        return np.diff(self.indptr)
+
+    def reduce_rows(self, values: FloatArray) -> FloatArray:
+        """Sum packed values by CSR row without materializing padding."""
+
+        values = np.asarray(values, dtype=float)
+        if values.ndim == 0 or values.shape[0] != self.indices.size:
+            raise ValueError("values must have one entry per sparse index")
+        result = np.zeros((self.n_rows, *values.shape[1:]), dtype=float)
+        nonempty_rows = np.flatnonzero(self.counts)
+        if nonempty_rows.size:
+            result[nonempty_rows] = np.add.reduceat(
+                values,
+                self.indptr[:-1][nonempty_rows],
+                axis=0,
+            )
+        return result
 
 
 @dataclass(frozen=True, slots=True)
 class SparseRowGain:
-    """Padded row-sparse matrix used by the local modal closure."""
+    """CSR gain whose immutable topology can be shared across time."""
 
-    indices: NDArray[np.int64]
+    topology: SparseRowTopology
     values: FloatArray
-    counts: NDArray[np.int64]
-    n_columns: int
+
+    @property
+    def n_columns(self) -> int:
+        return self.topology.n_columns
+
+    @property
+    def counts(self) -> NDArray[np.int64]:
+        return self.topology.counts
+
+    @property
+    def indices(self) -> NDArray[np.int64]:
+        return self.topology.indices
 
     def matvec(self, vector: FloatArray) -> FloatArray:
         vector = np.asarray(vector, dtype=float)
         if vector.shape != (self.n_columns,):
             raise ValueError("vector has the wrong size for sparse gain")
-        if self.values.shape[1] == 0:
-            return np.zeros(self.values.shape[0], dtype=float)
-        return np.sum(self.values * vector[self.indices], axis=1)
+        if self.values.size == 0:
+            return np.zeros(self.topology.n_rows, dtype=float)
+        return self.topology.reduce_rows(
+            self.values * vector[self.indices],
+        )
+
+    def matmat(self, matrix: FloatArray) -> FloatArray:
+        matrix = np.asarray(matrix, dtype=float)
+        if matrix.ndim != 2 or matrix.shape[0] != self.n_columns:
+            raise ValueError("matrix has the wrong leading size for sparse gain")
+        return self.topology.reduce_rows(
+            self.values[:, None] * matrix[self.indices]
+        )
+
+    def rmatvec(self, vector: FloatArray) -> FloatArray:
+        vector = np.asarray(vector, dtype=float)
+        if vector.shape != (self.topology.n_rows,):
+            raise ValueError("vector has the wrong size for transposed sparse gain")
+        if self.values.size == 0:
+            return np.zeros(self.n_columns, dtype=float)
+        return np.bincount(
+            self.indices,
+            weights=self.values * vector[self.topology.row_indices],
+            minlength=self.n_columns,
+        )
 
     def to_dense(self) -> FloatArray:
-        dense = np.zeros((self.values.shape[0], self.n_columns), dtype=float)
-        for row, count in enumerate(self.counts):
-            width = int(count)
-            if width:
-                dense[row, self.indices[row, :width]] = self.values[row, :width]
+        dense = np.zeros((self.topology.n_rows, self.n_columns), dtype=float)
+        if self.values.size:
+            np.add.at(
+                dense,
+                (self.topology.row_indices, self.indices),
+                self.values,
+            )
         return dense
 
 
@@ -167,6 +246,7 @@ class LocalCompletionStep:
     omitted_mean: FloatArray
     conditional_gain: SparseRowGain
     conditional_factor: FloatArray
+    factor_diagnostics: CompletionFactorDiagnostics
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +257,7 @@ class LocalPersistentTransitionStep:
     target_mean: FloatArray
     conditional_gain: SparseRowGain
     conditional_factor: FloatArray
+    factor_diagnostics: CompletionFactorDiagnostics
 
 
 class _GaussianCompletionBase:
@@ -189,6 +270,7 @@ class _GaussianCompletionBase:
         retained_modes: int,
         completion_start_time: float = 0.0,
         completion_rank: int | None = None,
+        residual_variance_tolerance: float | None = None,
         ridge: float = 1.0e-2,
         eigenvalue_tolerance: float = 1.0e-12,
     ) -> None:
@@ -202,6 +284,10 @@ class _GaussianCompletionBase:
             raise ValueError("completion_start_time must lie within the simulation")
         if completion_rank is not None and completion_rank <= 0:
             raise ValueError("completion_rank must be positive when provided")
+        if residual_variance_tolerance is not None and not (
+            0.0 <= residual_variance_tolerance < 1.0
+        ):
+            raise ValueError("residual_variance_tolerance must lie in [0, 1)")
         if ridge < 0.0:
             raise ValueError("ridge must be nonnegative")
         if eigenvalue_tolerance < 0.0:
@@ -216,6 +302,7 @@ class _GaussianCompletionBase:
         self.completion_start_time = float(config.times[self.completion_start_step])
         self.ridge = float(ridge)
         self.eigenvalue_tolerance = float(eigenvalue_tolerance)
+        self.residual_variance_tolerance = residual_variance_tolerance
 
         max_rank = self.omitted_modes
         requested_rank = max_rank if completion_rank is None else int(completion_rank)
@@ -256,9 +343,19 @@ class _GaussianCompletionBase:
             target_conditioning_covariance.T,
         ).T
 
-    def _low_rank_psd_factor(self, covariance: FloatArray) -> FloatArray:
+    def _low_rank_psd_factor_with_diagnostics(
+        self,
+        covariance: FloatArray,
+    ) -> tuple[FloatArray, CompletionFactorDiagnostics]:
         if covariance.size == 0 or self.completion_rank == 0:
-            return np.zeros((self.omitted_modes, 0), dtype=float)
+            return (
+                np.zeros((self.omitted_modes, 0), dtype=float),
+                CompletionFactorDiagnostics(
+                    selected_rank=0,
+                    captured_variance_fraction=1.0,
+                    tolerance_met=True,
+                ),
+            )
 
         symmetric = 0.5 * (covariance + covariance.T)
         eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
@@ -267,10 +364,103 @@ class _GaussianCompletionBase:
         eigenvectors = eigenvectors[:, order]
         scale = max(float(np.max(eigenvalues)), 1.0)
         positive = eigenvalues > self.eigenvalue_tolerance * scale
-        keep = min(self.completion_rank, int(np.count_nonzero(positive)))
+        positive_count = int(np.count_nonzero(positive))
+        positive_variance = float(np.sum(eigenvalues[:positive_count]))
+        if self.residual_variance_tolerance is None:
+            requested = positive_count
+        elif positive_count == 0:
+            requested = 0
+        else:
+            target_fraction = 1.0 - self.residual_variance_tolerance
+            cumulative_fraction = (
+                np.cumsum(eigenvalues[:positive_count]) / positive_variance
+            )
+            requested = int(
+                np.searchsorted(
+                    cumulative_fraction,
+                    target_fraction,
+                    side="left",
+                )
+                + 1
+            )
+        keep = min(self.completion_rank, requested)
         if keep == 0:
-            return np.zeros((self.omitted_modes, 0), dtype=float)
-        return eigenvectors[:, :keep] * np.sqrt(eigenvalues[:keep])[None, :]
+            factor = np.zeros((self.omitted_modes, 0), dtype=float)
+        else:
+            factor = eigenvectors[:, :keep] * np.sqrt(eigenvalues[:keep])[None, :]
+        captured_fraction = (
+            1.0
+            if positive_variance <= 0.0
+            else float(np.sum(eigenvalues[:keep]) / positive_variance)
+        )
+        tolerance_met = (
+            self.residual_variance_tolerance is None
+            or 1.0 - captured_fraction
+            <= self.residual_variance_tolerance + 10.0 * np.finfo(float).eps
+        )
+        return (
+            factor,
+            CompletionFactorDiagnostics(
+                selected_rank=keep,
+                captured_variance_fraction=captured_fraction,
+                tolerance_met=tolerance_met,
+            ),
+        )
+
+    def _low_rank_psd_factor(self, covariance: FloatArray) -> FloatArray:
+        factor, _ = self._low_rank_psd_factor_with_diagnostics(covariance)
+        return factor
+
+    def factor_diagnostics(self) -> tuple[CompletionFactorDiagnostics, ...]:
+        """Return innovation-factor diagnostics in saved-time order."""
+
+        if hasattr(self, "_steps"):
+            steps = getattr(self, "_steps")
+            return tuple(
+                step.factor_diagnostics for step in steps if step is not None
+            )
+        diagnostics: list[CompletionFactorDiagnostics] = []
+        initial = getattr(self, "_initial_step", None)
+        if initial is not None:
+            diagnostics.append(initial.factor_diagnostics)
+        transitions = getattr(self, "_transition_steps", ())
+        diagnostics.extend(
+            step.factor_diagnostics for step in transitions if step is not None
+        )
+        return tuple(diagnostics)
+
+    def factor_diagnostics_summary(self) -> dict[str, int | float | bool]:
+        """Summarize adaptive ranks and captured conditional variance."""
+
+        diagnostics = self.factor_diagnostics()
+        if not diagnostics:
+            return {
+                "factor_count": 0,
+                "selected_rank_min": 0,
+                "selected_rank_median": 0.0,
+                "selected_rank_max": 0,
+                "minimum_captured_variance_fraction": 1.0,
+                "tolerance_met": True,
+            }
+        ranks = np.asarray(
+            [diagnostic.selected_rank for diagnostic in diagnostics],
+            dtype=np.int64,
+        )
+        return {
+            "factor_count": len(diagnostics),
+            "selected_rank_min": int(np.min(ranks)),
+            "selected_rank_median": float(np.median(ranks)),
+            "selected_rank_max": int(np.max(ranks)),
+            "minimum_captured_variance_fraction": float(
+                min(
+                    diagnostic.captured_variance_fraction
+                    for diagnostic in diagnostics
+                )
+            ),
+            "tolerance_met": all(
+                diagnostic.tolerance_met for diagnostic in diagnostics
+            ),
+        }
 
     def _same_time_step(
         self,
@@ -286,12 +476,15 @@ class _GaussianCompletionBase:
 
         gain = self._stable_gain(c_ur, c_rr)
         conditional_covariance = c_uu - gain @ c_ru
-        factor = self._low_rank_psd_factor(conditional_covariance)
+        factor, diagnostics = self._low_rank_psd_factor_with_diagnostics(
+            conditional_covariance
+        )
         return CompletionStep(
             retained_mean=retained_mean,
             omitted_mean=omitted_mean,
             conditional_gain=gain,
             conditional_factor=factor,
+            factor_diagnostics=diagnostics,
         )
 
     def _validate_counts(self, raw_counts: FloatArray) -> FloatArray:
@@ -342,6 +535,7 @@ class UnresolvedGaussianCompleter(_GaussianCompletionBase):
         retained_modes: int,
         completion_start_time: float = 0.0,
         completion_rank: int | None = None,
+        residual_variance_tolerance: float | None = None,
         ridge: float = 1.0e-2,
         eigenvalue_tolerance: float = 1.0e-12,
     ) -> None:
@@ -350,6 +544,7 @@ class UnresolvedGaussianCompleter(_GaussianCompletionBase):
             retained_modes=retained_modes,
             completion_start_time=completion_start_time,
             completion_rank=completion_rank,
+            residual_variance_tolerance=residual_variance_tolerance,
             ridge=ridge,
             eigenvalue_tolerance=eigenvalue_tolerance,
         )
@@ -435,6 +630,7 @@ class PersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
         retained_modes: int,
         completion_start_time: float = 0.0,
         completion_rank: int | None = None,
+        residual_variance_tolerance: float | None = None,
         ridge: float = 1.0e-2,
         eigenvalue_tolerance: float = 1.0e-12,
     ) -> None:
@@ -443,6 +639,7 @@ class PersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             retained_modes=retained_modes,
             completion_start_time=completion_start_time,
             completion_rank=completion_rank,
+            residual_variance_tolerance=residual_variance_tolerance,
             ridge=ridge,
             eigenvalue_tolerance=eigenvalue_tolerance,
         )
@@ -531,7 +728,9 @@ class PersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             conditional_covariance = target_covariance - (
                 gain @ target_conditioning_covariance.T
             )
-            factor = self._low_rank_psd_factor(conditional_covariance)
+            factor, diagnostics = self._low_rank_psd_factor_with_diagnostics(
+                conditional_covariance
+            )
 
             conditioning_mean = np.concatenate(
                 [
@@ -545,6 +744,7 @@ class PersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
                 target_mean=modal_means[time_index + 1, r:],
                 conditional_gain=gain,
                 conditional_factor=factor,
+                factor_diagnostics=diagnostics,
             )
 
         return initial_step, transitions
@@ -628,6 +828,7 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
         retained_modes: int,
         completion_start_time: float = 0.0,
         completion_rank: int | None = None,
+        residual_variance_tolerance: float | None = None,
         modal_bandwidth: int = 12,
         ridge: float = 1.0e-2,
         eigenvalue_tolerance: float = 1.0e-12,
@@ -640,6 +841,7 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             retained_modes=retained_modes,
             completion_start_time=completion_start_time,
             completion_rank=completion_rank,
+            residual_variance_tolerance=residual_variance_tolerance,
             ridge=ridge,
             eigenvalue_tolerance=eigenvalue_tolerance,
         )
@@ -650,6 +852,7 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
         target_conditioning_covariance: FloatArray,
         conditioning_covariance: FloatArray,
         column_indices: list[NDArray[np.int64]],
+        topology: SparseRowTopology | None = None,
     ) -> SparseRowGain:
         width = max((indices.size for indices in column_indices), default=0)
         indices_array = np.zeros((self.omitted_modes, width), dtype=np.int64)
@@ -684,11 +887,52 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             )
             solved = np.linalg.solve(covariance, cross[..., None])[..., 0]
             values = np.where(active, solved, 0.0)
-        return SparseRowGain(
-            indices=indices_array,
-            values=values,
-            counts=counts,
-            n_columns=conditioning_covariance.shape[0],
+        if topology is None:
+            topology = self._sparse_topology(
+                column_indices,
+                n_columns=conditioning_covariance.shape[0],
+            )
+        packed_indices = (
+            indices_array[active] if width else np.empty(0, dtype=np.int64)
+        )
+        packed_values = values[active] if width else np.empty(0, dtype=float)
+        if (
+            topology.n_rows != self.omitted_modes
+            or topology.n_columns != conditioning_covariance.shape[0]
+            or not np.array_equal(packed_indices, topology.indices)
+        ):
+            raise ValueError("sparse topology does not match column_indices")
+        return SparseRowGain(topology=topology, values=packed_values)
+
+    @staticmethod
+    def _sparse_topology(
+        column_indices: list[NDArray[np.int64]],
+        *,
+        n_columns: int,
+    ) -> SparseRowTopology:
+        """Pack row-local column indices into an immutable CSR topology."""
+
+        counts = np.asarray(
+            [indices.size for indices in column_indices],
+            dtype=np.int64,
+        )
+        indptr = np.empty(counts.size + 1, dtype=np.int64)
+        indptr[0] = 0
+        np.cumsum(counts, out=indptr[1:])
+        nonempty = [indices for indices in column_indices if indices.size]
+        indices = (
+            np.concatenate(nonempty).astype(np.int64, copy=False)
+            if nonempty
+            else np.empty(0, dtype=np.int64)
+        )
+        if indices.size and (np.min(indices) < 0 or np.max(indices) >= n_columns):
+            raise ValueError("sparse column index lies outside n_columns")
+        row_indices = np.repeat(np.arange(counts.size, dtype=np.int64), counts)
+        return SparseRowTopology(
+            indptr=indptr,
+            indices=indices,
+            row_indices=row_indices,
+            n_columns=n_columns,
         )
 
     def _initial_columns(self) -> list[NDArray[np.int64]]:
@@ -744,6 +988,8 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
         active_columns: NDArray[np.int64],
         *,
         n_columns: int,
+        compact_topology: SparseRowTopology | None = None,
+        stored_topology: SparseRowTopology | None = None,
     ) -> tuple[SparseRowGain, FloatArray]:
         """Solve local rows and return their Schur-complement correction.
 
@@ -756,27 +1002,44 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             conditioning_to_target_covariance.T,
             conditioning_covariance,
             compact_column_indices,
+            topology=compact_topology,
         )
-        if compact_gain.values.shape[1] == 0:
-            stored_indices = compact_gain.indices.copy()
+        if compact_gain.values.size == 0:
             correction = np.zeros(
                 (self.omitted_modes, self.omitted_modes),
                 dtype=float,
             )
         else:
-            stored_indices = active_columns[compact_gain.indices]
+            counts = compact_gain.counts
+            width = int(np.max(counts))
+            padded_indices = np.zeros(
+                (self.omitted_modes, width),
+                dtype=np.int64,
+            )
+            active = np.arange(width)[None, :] < counts[:, None]
+            padded_indices[active] = compact_gain.indices
+            padded_values = np.zeros_like(padded_indices, dtype=float)
+            padded_values[active] = compact_gain.values
             selected_covariance = conditioning_to_target_covariance[
-                compact_gain.indices
+                padded_indices
             ]
-            correction = np.sum(
-                compact_gain.values[:, :, None] * selected_covariance,
-                axis=1,
+            correction = np.einsum(
+                "rw,rwu->ru",
+                padded_values,
+                selected_covariance,
+                optimize=True,
+            )
+        if stored_topology is None:
+            stored_columns = [
+                active_columns[indices] for indices in compact_column_indices
+            ]
+            stored_topology = self._sparse_topology(
+                stored_columns,
+                n_columns=n_columns,
             )
         gain = SparseRowGain(
-            indices=stored_indices,
+            topology=stored_topology,
             values=compact_gain.values,
-            counts=compact_gain.counts,
-            n_columns=n_columns,
         )
         return gain, correction
 
@@ -938,11 +1201,15 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             n_columns=r,
         )
         initial_covariance = initial_target_covariance - initial_correction
+        initial_factor, initial_diagnostics = (
+            self._low_rank_psd_factor_with_diagnostics(initial_covariance)
+        )
         initial = LocalCompletionStep(
             retained_mean=modal_means[start, :r],
             omitted_mean=modal_means[start, r:],
             conditional_gain=initial_gain,
-            conditional_factor=self._low_rank_psd_factor(initial_covariance),
+            conditional_factor=initial_factor,
+            factor_diagnostics=initial_diagnostics,
         )
 
         transitions: list[LocalPersistentTransitionStep | None] = [
@@ -950,6 +1217,14 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
         ] * (self.config.n_steps - 1)
         local_columns = self._transition_columns()
         active_columns, compact_columns = self._active_columns(local_columns)
+        compact_topology = self._sparse_topology(
+            compact_columns,
+            n_columns=active_columns.size,
+        )
+        stored_topology = self._sparse_topology(
+            [active_columns[indices] for indices in compact_columns],
+            n_columns=u + 2 * r,
+        )
         current_columns = active_columns[active_columns < u + r]
         current_modes = np.where(
             current_columns < u,
@@ -999,6 +1274,8 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
                     compact_columns,
                     active_columns,
                     n_columns=u + 2 * r,
+                    compact_topology=compact_topology,
+                    stored_topology=stored_topology,
                 )
                 conditional_covariance = target_covariance - correction
                 conditioning_mean = np.concatenate(
@@ -1008,13 +1285,15 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
                         modal_means[time_index + 1, :r],
                     ]
                 )
+                factor, diagnostics = self._low_rank_psd_factor_with_diagnostics(
+                    conditional_covariance
+                )
                 transitions[time_index] = LocalPersistentTransitionStep(
                     conditioning_mean=conditioning_mean,
                     target_mean=modal_means[time_index + 1, r:],
                     conditional_gain=gain,
-                    conditional_factor=self._low_rank_psd_factor(
-                        conditional_covariance
-                    ),
+                    conditional_factor=factor,
+                    factor_diagnostics=diagnostics,
                 )
         return initial, transitions
 
