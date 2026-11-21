@@ -101,7 +101,7 @@ def test_selected_operating_points_scale_and_benchmark() -> None:
         "accuracy_first",
     }
     assert all(record.peak_rss_bytes > 0 for record in records)
-    assert all(record.closure == "local_persistent" for record in records)
+    assert all(record.closure == "dense_persistent" for record in records)
 
 
 def test_operating_point_study_cli_is_registered() -> None:
@@ -120,6 +120,7 @@ def test_operating_point_study_cli_is_registered() -> None:
     assert args.command == "study-operating-points"
     assert args.accuracy_nodes == 11
     assert args.accuracy_runs == 20
+    assert args.closure == "dense_persistent"
 
 
 def test_structured_closure_study_cli_is_registered() -> None:

@@ -38,6 +38,77 @@ from .references import (
 FloatArray = NDArray[np.float64]
 
 
+def _modal_multinomial_covariance_block(
+    probability: FloatArray,
+    vectors: FloatArray,
+    n_particles: int,
+    row_modes: NDArray[np.integer],
+    column_modes: NDArray[np.integer],
+    *,
+    modal_probability: FloatArray | None = None,
+) -> FloatArray:
+    """Return an exact same-time modal covariance block.
+
+    This evaluates the multinomial identity directly for the requested modal
+    index sets instead of constructing either the spatial covariance or the
+    full modal covariance:
+
+    ``N (V_I.T diag(p) V_J - (V_I.T p) (V_J.T p).T)``.
+    """
+
+    probability = np.asarray(probability, dtype=float)
+    vectors = np.asarray(vectors, dtype=float)
+    rows = np.asarray(row_modes, dtype=np.int64)
+    columns = np.asarray(column_modes, dtype=np.int64)
+    q = probability @ vectors if modal_probability is None else modal_probability
+    left = vectors[:, rows]
+    right = vectors[:, columns]
+    return n_particles * (
+        left.T @ (probability[:, None] * right)
+        - np.outer(q[rows], q[columns])
+    )
+
+
+def _modal_multinomial_cross_covariance_block(
+    probability: FloatArray,
+    next_probability: FloatArray,
+    vectors: FloatArray,
+    one_step_factors: FloatArray,
+    n_particles: int,
+    row_modes: NDArray[np.integer],
+    column_modes: NDArray[np.integer],
+    *,
+    modal_probability: FloatArray | None = None,
+    next_modal_probability: FloatArray | None = None,
+) -> FloatArray:
+    """Return ``Cov(m_t[I], m_(t+1)[J])`` without a dense transition.
+
+    The random-walk transition and diffusion operator share ``vectors``, so
+    ``P V_J = V_J diag(1 - dt * lambda_J)``.  The requested block is therefore
+
+    ``N (V_I.T diag(p_t) P V_J - q_t[I] q_(t+1)[J].T)``.
+    """
+
+    probability = np.asarray(probability, dtype=float)
+    next_probability = np.asarray(next_probability, dtype=float)
+    vectors = np.asarray(vectors, dtype=float)
+    factors = np.asarray(one_step_factors, dtype=float)
+    rows = np.asarray(row_modes, dtype=np.int64)
+    columns = np.asarray(column_modes, dtype=np.int64)
+    q_t = probability @ vectors if modal_probability is None else modal_probability
+    q_next = (
+        next_probability @ vectors
+        if next_modal_probability is None
+        else next_modal_probability
+    )
+    left = vectors[:, rows]
+    propagated_right = vectors[:, columns] * factors[columns][None, :]
+    return n_particles * (
+        left.T @ (probability[:, None] * propagated_right)
+        - np.outer(q_t[rows], q_next[columns])
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CompletionStep:
     """Precomputed same-time Gaussian conditional parameters."""
@@ -651,17 +722,164 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             rows.append(columns)
         return rows
 
-    def _modal_covariance(
+    @staticmethod
+    def _active_columns(
+        column_indices: list[NDArray[np.int64]],
+    ) -> tuple[NDArray[np.int64], list[NDArray[np.int64]]]:
+        """Return the union of row-local columns and compact row indices."""
+
+        nonempty = [indices for indices in column_indices if indices.size]
+        if not nonempty:
+            empty = np.empty(0, dtype=np.int64)
+            return empty, [empty.copy() for _ in column_indices]
+        active = np.unique(np.concatenate(nonempty)).astype(np.int64)
+        compact = [np.searchsorted(active, indices) for indices in column_indices]
+        return active, compact
+
+    def _solve_restricted_gain(
         self,
-        probability: FloatArray,
-        vectors: FloatArray,
-    ) -> FloatArray:
-        modal_probability = probability @ vectors
-        covariance = self.config.n_particles * (
-            vectors.T @ (probability[:, None] * vectors)
-            - np.outer(modal_probability, modal_probability)
+        conditioning_to_target_covariance: FloatArray,
+        conditioning_covariance: FloatArray,
+        compact_column_indices: list[NDArray[np.int64]],
+        active_columns: NDArray[np.int64],
+        *,
+        n_columns: int,
+    ) -> tuple[SparseRowGain, FloatArray]:
+        """Solve local rows and return their Schur-complement correction.
+
+        The covariance inputs live only on the union of columns used by at
+        least one local row.  Stored indices are mapped back to the full
+        conditioning vector so trajectory evaluation is unchanged.
+        """
+
+        compact_gain = self._solve_sparse_gain(
+            conditioning_to_target_covariance.T,
+            conditioning_covariance,
+            compact_column_indices,
         )
-        return 0.5 * (covariance + covariance.T)
+        if compact_gain.values.shape[1] == 0:
+            stored_indices = compact_gain.indices.copy()
+            correction = np.zeros(
+                (self.omitted_modes, self.omitted_modes),
+                dtype=float,
+            )
+        else:
+            stored_indices = active_columns[compact_gain.indices]
+            selected_covariance = conditioning_to_target_covariance[
+                compact_gain.indices
+            ]
+            correction = np.sum(
+                compact_gain.values[:, :, None] * selected_covariance,
+                axis=1,
+            )
+        gain = SparseRowGain(
+            indices=stored_indices,
+            values=compact_gain.values,
+            counts=compact_gain.counts,
+            n_columns=n_columns,
+        )
+        return gain, correction
+
+    def _transition_restricted_covariances(
+        self,
+        current_covariance: FloatArray,
+        next_covariance: FloatArray,
+        cross_covariance: FloatArray,
+        active_columns: NDArray[np.int64],
+        mode_lookup: NDArray[np.int64],
+        target_indices: NDArray[np.int64],
+    ) -> tuple[FloatArray, FloatArray, FloatArray]:
+        """Assemble only the active conditioning blocks for one transition."""
+
+        r = self.retained_modes
+        u = self.omitted_modes
+        active_size = active_columns.size
+        conditioning_covariance = np.zeros(
+            (active_size, active_size),
+            dtype=float,
+        )
+        conditioning_to_target = np.zeros(
+            (active_size, u),
+            dtype=float,
+        )
+
+        current_positions = np.flatnonzero(active_columns < u + r)
+        next_positions = np.flatnonzero(active_columns >= u + r)
+        current_columns = active_columns[current_positions]
+        current_modes = np.where(
+            current_columns < u,
+            r + current_columns,
+            current_columns - u,
+        ).astype(np.int64)
+        next_modes = (active_columns[next_positions] - u - r).astype(np.int64)
+        current_indices = mode_lookup[current_modes]
+        next_indices = mode_lookup[next_modes]
+
+        if current_positions.size:
+            conditioning_covariance[np.ix_(current_positions, current_positions)] = (
+                current_covariance[np.ix_(current_indices, current_indices)]
+            )
+            conditioning_to_target[current_positions] = (
+                cross_covariance[np.ix_(current_indices, target_indices)]
+            )
+        if next_positions.size:
+            conditioning_covariance[np.ix_(next_positions, next_positions)] = (
+                next_covariance[np.ix_(next_indices, next_indices)]
+            )
+            conditioning_to_target[next_positions] = (
+                next_covariance[np.ix_(next_indices, target_indices)]
+            )
+        if current_positions.size and next_positions.size:
+            current_next = cross_covariance[
+                np.ix_(current_indices, next_indices)
+            ]
+            conditioning_covariance[np.ix_(current_positions, next_positions)] = (
+                current_next
+            )
+            conditioning_covariance[np.ix_(next_positions, current_positions)] = (
+                current_next.T
+            )
+
+        conditioning_covariance = 0.5 * (
+            conditioning_covariance + conditioning_covariance.T
+        )
+        target_covariance = next_covariance[
+            np.ix_(target_indices, target_indices)
+        ]
+        target_covariance = 0.5 * (target_covariance + target_covariance.T)
+        return (
+            conditioning_covariance,
+            conditioning_to_target,
+            target_covariance,
+        )
+
+    def _restricted_covariance_chunk(
+        self,
+        probabilities: FloatArray,
+        modal_probabilities: FloatArray,
+        mode_indices: NDArray[np.int64],
+        one_step_factors: FloatArray,
+    ) -> tuple[FloatArray, FloatArray]:
+        """Return same-time and adjacent-time blocks for a short time chunk."""
+
+        selected_vectors = self.full_basis.eigenvectors[:, mode_indices]
+        weighted_gram = np.einsum(
+            "xi,tx,xj->tij",
+            selected_vectors,
+            probabilities,
+            selected_vectors,
+            optimize=True,
+        )
+        q = modal_probabilities[:, mode_indices]
+        same_time = self.config.n_particles * (
+            weighted_gram - q[:, :, None] * q[:, None, :]
+        )
+        same_time = 0.5 * (same_time + np.swapaxes(same_time, 1, 2))
+        cross_time = self.config.n_particles * (
+            weighted_gram[:-1] * one_step_factors[mode_indices][None, None, :]
+            - q[:-1, :, None] * q[1:, None, :]
+        )
+        return same_time, cross_time
 
     def _precompute_local_steps(
         self,
@@ -670,24 +888,56 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             return None, [None] * max(self.config.n_steps - 1, 0)
 
         probabilities = multinomial_node_probabilities(self.config)
-        transition = random_walk_transition_matrix(self.config)
         vectors = self.full_basis.eigenvectors
-        transition_vectors = transition @ vectors
-        modal_means = self.config.n_particles * (probabilities @ vectors)
+        modal_probabilities = probabilities @ vectors
+        modal_means = self.config.n_particles * modal_probabilities
+        one_step_factors = 1.0 - self.config.dt * self.full_basis.eigenvalues
         start = self.completion_start_step
         r = self.retained_modes
+        u = self.omitted_modes
+        target_modes = np.arange(r, self.config.n_nodes, dtype=np.int64)
 
-        start_covariance = self._modal_covariance(probabilities[start], vectors)
-        c_rr = start_covariance[:r, :r]
-        c_ur = start_covariance[r:, :r]
-        c_ru = start_covariance[:r, r:]
-        c_uu = start_covariance[r:, r:]
-        initial_gain = self._solve_sparse_gain(
-            c_ur,
-            c_rr,
-            self._initial_columns(),
+        initial_columns = self._initial_columns()
+        initial_active, initial_compact = self._active_columns(initial_columns)
+        initial_conditioning_covariance = _modal_multinomial_covariance_block(
+            probabilities[start],
+            vectors,
+            self.config.n_particles,
+            initial_active,
+            initial_active,
+            modal_probability=modal_probabilities[start],
         )
-        initial_covariance = c_uu - initial_gain.to_dense() @ c_ru
+        initial_conditioning_covariance = 0.5 * (
+            initial_conditioning_covariance
+            + initial_conditioning_covariance.T
+        )
+        initial_conditioning_to_target = _modal_multinomial_covariance_block(
+            probabilities[start],
+            vectors,
+            self.config.n_particles,
+            initial_active,
+            target_modes,
+            modal_probability=modal_probabilities[start],
+        )
+        initial_target_covariance = _modal_multinomial_covariance_block(
+            probabilities[start],
+            vectors,
+            self.config.n_particles,
+            target_modes,
+            target_modes,
+            modal_probability=modal_probabilities[start],
+        )
+        initial_target_covariance = 0.5 * (
+            initial_target_covariance + initial_target_covariance.T
+        )
+        initial_gain, initial_correction = self._solve_restricted_gain(
+            initial_conditioning_to_target,
+            initial_conditioning_covariance,
+            initial_compact,
+            initial_active,
+            n_columns=r,
+        )
+        initial_covariance = initial_target_covariance - initial_correction
         initial = LocalCompletionStep(
             retained_mean=modal_means[start, :r],
             omitted_mean=modal_means[start, r:],
@@ -699,66 +949,73 @@ class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             None
         ] * (self.config.n_steps - 1)
         local_columns = self._transition_columns()
-        c_tt = start_covariance
-        for time_index in range(start, self.config.n_steps - 1):
-            p_t = probabilities[time_index]
-            p_next = probabilities[time_index + 1]
-            c_nn = self._modal_covariance(p_next, vectors)
-            q_t = p_t @ vectors
-            q_next = p_next @ vectors
-            cross_modal = self.config.n_particles * (
-                vectors.T @ (p_t[:, None] * transition_vectors)
-                - np.outer(q_t, q_next)
-            )
+        active_columns, compact_columns = self._active_columns(local_columns)
+        current_columns = active_columns[active_columns < u + r]
+        current_modes = np.where(
+            current_columns < u,
+            r + current_columns,
+            current_columns - u,
+        ).astype(np.int64)
+        next_modes = (
+            active_columns[active_columns >= u + r] - u - r
+        ).astype(np.int64)
+        covariance_modes = np.unique(
+            np.concatenate([target_modes, current_modes, next_modes])
+        ).astype(np.int64)
+        mode_lookup = np.full(self.config.n_nodes, -1, dtype=np.int64)
+        mode_lookup[covariance_modes] = np.arange(covariance_modes.size)
+        target_indices = mode_lookup[target_modes]
 
-            c_ut_ut = c_tt[r:, r:]
-            c_ut_rt = c_tt[r:, :r]
-            c_ut_rn = cross_modal[r:, :r]
-            c_rt_rt = c_tt[:r, :r]
-            c_rt_rn = cross_modal[:r, :r]
-            c_rn_rn = c_nn[:r, :r]
-            conditioning_covariance = np.block(
-                [
-                    [c_ut_ut, c_ut_rt, c_ut_rn],
-                    [c_ut_rt.T, c_rt_rt, c_rt_rn],
-                    [c_ut_rn.T, c_rt_rn.T, c_rn_rn],
-                ]
+        # Chunking keeps temporary covariance storage bounded while retaining
+        # efficient batched contractions over time.
+        chunk_size = 64
+        for chunk_start in range(start, self.config.n_steps - 1, chunk_size):
+            chunk_stop = min(
+                chunk_start + chunk_size,
+                self.config.n_steps - 1,
             )
-            conditioning_covariance = 0.5 * (
-                conditioning_covariance + conditioning_covariance.T
+            same_time, cross_time = self._restricted_covariance_chunk(
+                probabilities[chunk_start : chunk_stop + 1],
+                modal_probabilities[chunk_start : chunk_stop + 1],
+                covariance_modes,
+                one_step_factors,
             )
-            target_conditioning_covariance = np.concatenate(
-                [
-                    cross_modal[r:, r:].T,
-                    cross_modal[:r, r:].T,
-                    c_nn[r:, :r],
-                ],
-                axis=1,
-            )
-            gain = self._solve_sparse_gain(
-                target_conditioning_covariance,
-                conditioning_covariance,
-                local_columns,
-            )
-            conditional_covariance = c_nn[r:, r:] - (
-                gain.to_dense() @ target_conditioning_covariance.T
-            )
-            conditioning_mean = np.concatenate(
-                [
-                    modal_means[time_index, r:],
-                    modal_means[time_index, :r],
-                    modal_means[time_index + 1, :r],
-                ]
-            )
-            transitions[time_index] = LocalPersistentTransitionStep(
-                conditioning_mean=conditioning_mean,
-                target_mean=modal_means[time_index + 1, r:],
-                conditional_gain=gain,
-                conditional_factor=self._low_rank_psd_factor(
-                    conditional_covariance
-                ),
-            )
-            c_tt = c_nn
+            for offset, time_index in enumerate(range(chunk_start, chunk_stop)):
+                (
+                    conditioning_covariance,
+                    conditioning_to_target,
+                    target_covariance,
+                ) = self._transition_restricted_covariances(
+                    same_time[offset],
+                    same_time[offset + 1],
+                    cross_time[offset],
+                    active_columns,
+                    mode_lookup,
+                    target_indices,
+                )
+                gain, correction = self._solve_restricted_gain(
+                    conditioning_to_target,
+                    conditioning_covariance,
+                    compact_columns,
+                    active_columns,
+                    n_columns=u + 2 * r,
+                )
+                conditional_covariance = target_covariance - correction
+                conditioning_mean = np.concatenate(
+                    [
+                        modal_means[time_index, r:],
+                        modal_means[time_index, :r],
+                        modal_means[time_index + 1, :r],
+                    ]
+                )
+                transitions[time_index] = LocalPersistentTransitionStep(
+                    conditioning_mean=conditioning_mean,
+                    target_mean=modal_means[time_index + 1, r:],
+                    conditional_gain=gain,
+                    conditional_factor=self._low_rank_psd_factor(
+                        conditional_covariance
+                    ),
+                )
         return initial, transitions
 
     def complete(

@@ -151,8 +151,10 @@ outputs and discrete multinomial counts do not share identical support.
 ## Structured-closure follow-up
 
 The subsequent `study-structured-closure` run replaced the dense time-indexed
-gain with bandwidth-12 row-sparse modal gains. At 201 nodes, retained arrays fell
-from 27.72 to 9.99 MiB and sampled peak RSS fell from 433.01 to 85.75 MiB. Setup
-time improved from 1.195 to 1.117 seconds. The local closure passed the base
-500-trial and five held-out 250-trial accuracy gates, so selected-pipeline
-benchmarks now use it by default.
+gain with exact restricted-block, row-sparse modal gains. At 201 nodes,
+bandwidth 12 reduces retained arrays from 27.72 to 9.99 MiB and sampled peak RSS
+from 435.46 to 88.23 MiB in the seven-repeat hardened rerun. It passes base
+accuracy and performance gates, but a
+hardened rerun rejects bandwidths 12 and 20 on long-domain lag covariance.
+Selected-pipeline benchmarks therefore use dense persistent completion by
+default; local closure remains an explicit memory experiment.

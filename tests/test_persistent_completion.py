@@ -3,9 +3,16 @@ import numpy as np
 from eigendiffusion.completion import (
     LocalPersistentUnresolvedGaussianCompleter,
     PersistentUnresolvedGaussianCompleter,
+    _modal_multinomial_covariance_block,
+    _modal_multinomial_cross_covariance_block,
 )
 from eigendiffusion.config import DiffusionConfig
 from eigendiffusion.ensemble import apply_readout_ensemble, run_modal_ensemble
+from eigendiffusion.operators import eigendecompose, neumann_laplacian_1d
+from eigendiffusion.references import (
+    multinomial_node_probabilities,
+    random_walk_transition_matrix,
+)
 from eigendiffusion.temporal import (
     mean_node_lag_correlation_from_runs,
     multinomial_mean_node_lag_correlation,
@@ -195,6 +202,185 @@ def test_persistent_completion_rank_is_capped() -> None:
         completion_rank=100,
     )
     assert completer.completion_rank == 1
+
+
+def test_restricted_modal_covariance_blocks_match_dense_formulas() -> None:
+    config = DiffusionConfig(
+        n_particles=200,
+        n_nodes=11,
+        n_steps=8,
+        impulse_index=5,
+        dt=1.0,
+        length=4.0,
+        diffusion_coefficient=2.20e-4,
+    )
+    operator = neumann_laplacian_1d(
+        config.n_nodes,
+        config.length,
+        config.diffusion_coefficient,
+    )
+    basis = eigendecompose(operator)
+    vectors = basis.eigenvectors
+    transition = random_walk_transition_matrix(config)
+    probabilities = multinomial_node_probabilities(config)
+    rows = np.array([1, 4, 7, 9], dtype=np.int64)
+    columns = np.array([0, 3, 6, 10], dtype=np.int64)
+    time_index = 3
+
+    probability = probabilities[time_index]
+    next_probability = probabilities[time_index + 1]
+    spatial_covariance = config.n_particles * (
+        np.diag(probability) - np.outer(probability, probability)
+    )
+    dense_modal = vectors.T @ spatial_covariance @ vectors
+    restricted = _modal_multinomial_covariance_block(
+        probability,
+        vectors,
+        config.n_particles,
+        rows,
+        columns,
+    )
+    np.testing.assert_allclose(
+        restricted,
+        dense_modal[np.ix_(rows, columns)],
+        atol=1.0e-12,
+        rtol=1.0e-12,
+    )
+
+    cross_spatial = config.n_particles * (
+        probability[:, None] * transition
+        - np.outer(probability, next_probability)
+    )
+    dense_cross_modal = vectors.T @ cross_spatial @ vectors
+    restricted_cross = _modal_multinomial_cross_covariance_block(
+        probability,
+        next_probability,
+        vectors,
+        1.0 - config.dt * basis.eigenvalues,
+        config.n_particles,
+        rows,
+        columns,
+    )
+    np.testing.assert_allclose(
+        restricted_cross,
+        dense_cross_modal[np.ix_(rows, columns)],
+        atol=1.0e-12,
+        rtol=1.0e-12,
+    )
+
+
+def test_local_restricted_parameters_match_legacy_full_assembly() -> None:
+    config = DiffusionConfig(
+        n_particles=200,
+        n_nodes=11,
+        n_steps=8,
+        impulse_index=5,
+        dt=1.0,
+        length=4.0,
+        diffusion_coefficient=2.20e-4,
+    )
+    completer = LocalPersistentUnresolvedGaussianCompleter(
+        config,
+        retained_modes=6,
+        completion_start_time=2.0,
+        completion_rank=3,
+        modal_bandwidth=2,
+    )
+    probabilities = multinomial_node_probabilities(config)
+    transition = random_walk_transition_matrix(config)
+    vectors = completer.full_basis.eigenvectors
+    transition_vectors = transition @ vectors
+    r = completer.retained_modes
+    start = completer.completion_start_step
+
+    def modal_covariance(probability: np.ndarray) -> np.ndarray:
+        modal_probability = probability @ vectors
+        covariance = config.n_particles * (
+            vectors.T @ (probability[:, None] * vectors)
+            - np.outer(modal_probability, modal_probability)
+        )
+        return 0.5 * (covariance + covariance.T)
+
+    c_tt = modal_covariance(probabilities[start])
+    expected_initial_gain = completer._solve_sparse_gain(
+        c_tt[r:, :r],
+        c_tt[:r, :r],
+        completer._initial_columns(),
+    )
+    expected_initial_covariance = (
+        c_tt[r:, r:]
+        - expected_initial_gain.to_dense() @ c_tt[:r, r:]
+    )
+    initial = completer._initial_step
+    assert initial is not None
+    np.testing.assert_allclose(
+        initial.conditional_gain.to_dense(),
+        expected_initial_gain.to_dense(),
+        atol=1.0e-11,
+        rtol=1.0e-11,
+    )
+    expected_initial_factor = completer._low_rank_psd_factor(
+        expected_initial_covariance
+    )
+    np.testing.assert_allclose(
+        initial.conditional_factor @ initial.conditional_factor.T,
+        expected_initial_factor @ expected_initial_factor.T,
+        atol=1.0e-10,
+        rtol=1.0e-10,
+    )
+
+    time_index = start
+    p_t = probabilities[time_index]
+    p_next = probabilities[time_index + 1]
+    c_nn = modal_covariance(p_next)
+    q_t = p_t @ vectors
+    q_next = p_next @ vectors
+    cross_modal = config.n_particles * (
+        vectors.T @ (p_t[:, None] * transition_vectors)
+        - np.outer(q_t, q_next)
+    )
+    conditioning_covariance = np.block(
+        [
+            [c_tt[r:, r:], c_tt[r:, :r], cross_modal[r:, :r]],
+            [c_tt[:r, r:], c_tt[:r, :r], cross_modal[:r, :r]],
+            [cross_modal[r:, :r].T, cross_modal[:r, :r].T, c_nn[:r, :r]],
+        ]
+    )
+    conditioning_covariance = 0.5 * (
+        conditioning_covariance + conditioning_covariance.T
+    )
+    target_conditioning_covariance = np.concatenate(
+        [
+            cross_modal[r:, r:].T,
+            cross_modal[:r, r:].T,
+            c_nn[r:, :r],
+        ],
+        axis=1,
+    )
+    expected_gain = completer._solve_sparse_gain(
+        target_conditioning_covariance,
+        conditioning_covariance,
+        completer._transition_columns(),
+    )
+    expected_covariance = (
+        c_nn[r:, r:]
+        - expected_gain.to_dense() @ target_conditioning_covariance.T
+    )
+    transition_step = completer._transition_steps[time_index]
+    assert transition_step is not None
+    np.testing.assert_allclose(
+        transition_step.conditional_gain.to_dense(),
+        expected_gain.to_dense(),
+        atol=1.0e-11,
+        rtol=1.0e-11,
+    )
+    expected_factor = completer._low_rank_psd_factor(expected_covariance)
+    np.testing.assert_allclose(
+        transition_step.conditional_factor @ transition_step.conditional_factor.T,
+        expected_factor @ expected_factor.T,
+        atol=1.0e-10,
+        rtol=1.0e-10,
+    )
 
 
 def test_local_persistent_matches_dense_at_full_bandwidth() -> None:

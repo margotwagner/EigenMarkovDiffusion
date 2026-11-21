@@ -3,6 +3,12 @@
 The `study-fitted-closure` workflow tests whether the validated bandwidth-12
 local closure can be made independent of exact multinomial covariance.
 
+These fitted experiments used bandwidth 12 as their frozen analytic comparator.
+A subsequent statistically hardened held-out rerun rejects local bandwidths 12
+and 20 on long-domain lag covariance, so dense analytic persistent completion is
+now the production default. That later decision does not change the negative
+fitted-transfer results below.
+
 ## Fitted model
 
 Eight training configurations span 51--201 nodes, 2,000--9,000 particles,
@@ -46,8 +52,7 @@ unseen 500-trial base case:
 
 Variance, covariance, and temporal failures also occurred on several held-out
 physical configurations. The frozen model therefore remains an experimental
-baseline and the analytic bandwidth-12 local closure remains the production
-default.
+baseline and does not displace either analytic closure.
 
 ## Performance result
 
@@ -97,8 +102,8 @@ seconds. Analytic-local took 0.164 seconds, so the approximately 0.206-second
 runtime gate still failed. The scientific bottleneck is now localized to
 regression transfer across physical configurations, not innovation rank.
 
-The analytic bandwidth-12 closure remains the production default. The next
-model should condition a shared local operator directly on dimensionless modal
+The analytic bandwidth-12 closure remained the frozen comparator for this
+study. The next learned model would need to condition a shared local operator directly on dimensionless modal
 decay, time, and physical descriptors instead of interpolating separately
 fitted ridge coefficients, which are not stable coordinates across anchors.
 
@@ -149,8 +154,10 @@ case. No new accuracy or runtime promotion claim is made.
 
 This result argues against adding more anchors or trajectories within the same
 local linear-regression architecture. The analytic bandwidth-12 closure remains
-the production model. Continuing the learned replacement would require a
-fundamentally different conditional-operator architecture and should preserve
-the frozen lockbox for that future attempt.
+the frozen comparator for this fitted study, while the later hardened
+structured comparison makes dense analytic persistent completion the production
+default. Continuing the learned replacement would require a fundamentally
+different conditional-operator architecture and should preserve the frozen
+lockbox for that future attempt.
 
 Pre-lockbox outputs are under `outputs/target_conditioned_prelockbox/`.

@@ -127,6 +127,13 @@ The available workflows are:
 | `study-fitted-closure` | Train and test a frozen trajectory-fitted sparse closure |
 | `benchmark-random-walk` | Compare particle and aggregated random-walk baselines |
 
+Two staged scaling drivers live under `examples/`:
+
+- `run_mode_scaling.py` compares proportional, fixed, spectral-decay, and exact
+  mean-cutoff retained-mode policies.
+- `run_completion_scaling.py` screens completion rank and modal bandwidth after
+  a retained-mode policy fails.
+
 For example, compare the main modal formulations:
 
 ```bash
@@ -199,10 +206,19 @@ It measures setup and trajectory time, retained arrays, isolated process peak
 RSS, selected-node Jensen--Shannon and Wasserstein distances, and sliced
 Wasserstein distance for full spatial vectors.
 
-Selected completed-pipeline workflows now use the validated bandwidth-12 local
-persistent closure by default. The dense persistent readout remains available
-for reference comparisons. See
-[structured local closure](docs/STRUCTURED_LOCAL_CLOSURE.md).
+Selected completed-pipeline workflows use the dense analytic persistent closure
+by default. The hardened local-closure rerun uses case-specific sampling floors,
+paired confidence intervals, and identical distribution projections; bandwidths
+12 and 20 both miss the long-domain lag-covariance gate despite retaining a
+large memory advantage. See [structured local closure](docs/STRUCTURED_LOCAL_CLOSURE.md).
+
+The resolution-aware mode study compares proportional retention with fixed,
+continuum-decay, and exact discrete mean cutoffs. A 250-run screen shows that a
+fixed rank-5 completion cannot support plateauing retained modes. Under the
+local analytic completion used for this scaling screen, fixed 75 modes becomes
+noninferior at 151 and 201 nodes when completion rank is increased to 20, but
+current setup time and retained storage are worse than the proportional rank-5
+baseline. See [mode scaling](docs/MODE_SCALING.md).
 
 The first cross-configuration fitted closure was also implemented and tested,
 but it did not pass the declared variance, covariance, temporal, or runtime

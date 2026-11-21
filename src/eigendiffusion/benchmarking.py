@@ -97,7 +97,10 @@ SELECTED_OPERATING_POINTS: tuple[OperatingPoint, ...] = (
     OperatingPoint("balanced", 50, 10.0, 10),
     OperatingPoint("accuracy_first", 75, 30.0, 5),
 )
-DEFAULT_COMPLETION_CLOSURE = "local_persistent"
+# The hardened held-out gate rejects the local closure on long-domain lag
+# covariance. Keep the exact dense analytic closure as the production default;
+# local variants remain explicit performance experiments.
+DEFAULT_COMPLETION_CLOSURE = "dense_persistent"
 DEFAULT_LOCAL_MODAL_BANDWIDTH = 12
 
 

@@ -15,6 +15,7 @@ import numpy as np
 
 from .benchmarking import (
     BENCHMARK_METHOD_NAMES,
+    DEFAULT_COMPLETION_CLOSURE,
     DEFAULT_LOCAL_MODAL_BANDWIDTH,
     SELECTED_OPERATING_POINTS,
     benchmark_operating_points,
@@ -44,6 +45,7 @@ from .ensemble import (
 from .handoff import pareto_handoff_indices, predict_handoff_grid
 from .metrics import (
     bootstrap_error_intervals,
+    paired_bootstrap_error_difference_intervals,
     relative_frobenius_error,
     relative_l2_error,
     relative_l2_error_from_time,
@@ -78,6 +80,87 @@ from .temporal import (
     multinomial_mean_node_lag_correlation,
     valid_time_origins,
 )
+
+
+STRUCTURED_CLOSURE_ACCEPTANCE_METRICS = (
+    "mean_relative_l2_error",
+    "mean_max_time_relative_l2_error",
+    "variance_relative_l2_error",
+    "variance_max_time_relative_l2_error",
+    "covariance_relative_frobenius_error",
+    "cross_time_covariance_relative_frobenius_error",
+    "marginal_normalized_wasserstein",
+    "sliced_normalized_wasserstein",
+)
+STRUCTURED_CLOSURE_BOOTSTRAP_METRICS = frozenset(
+    {
+        "mean_relative_l2_error",
+        "variance_relative_l2_error",
+        "covariance_relative_frobenius_error",
+    }
+)
+
+
+def _structured_closure_noninferiority_pass(
+    candidate: dict[str, object],
+    baseline: dict[str, object],
+    sampling_floor: dict[str, object],
+) -> bool:
+    """Apply predeclared, case-matched closure noninferiority margins."""
+
+    for metric in STRUCTURED_CLOSURE_ACCEPTANCE_METRICS:
+        margin_multiplier = (
+            0.25
+            if metric == "cross_time_covariance_relative_frobenius_error"
+            else 1.0
+        )
+        margin = margin_multiplier * float(sampling_floor[metric])
+        interval_key = f"{metric}_difference_ci_upper"
+        if metric in STRUCTURED_CLOSURE_BOOTSTRAP_METRICS and interval_key in candidate:
+            difference_upper = float(candidate[interval_key])
+        else:
+            difference_upper = float(candidate[metric]) - float(baseline[metric])
+        if difference_upper > margin:
+            return False
+
+    negative_mass_tolerance = max(
+        float(sampling_floor["mean_negative_mass_fraction"]),
+        1.0e-12,
+    )
+    if float(candidate["mean_negative_mass_fraction"]) > (
+        float(baseline["mean_negative_mass_fraction"])
+        + negative_mass_tolerance
+    ):
+        return False
+    mass_tolerance = max(float(sampling_floor["maximum_mass_error"]), 1.0e-9)
+    return float(candidate["maximum_mass_error"]) <= (
+        float(baseline["maximum_mass_error"]) + mass_tolerance
+    )
+
+
+def _structured_heldout_bandwidth_passes(
+    heldout_rows: list[dict[str, object]],
+    modal_bandwidth: int,
+) -> bool:
+    """Return whether one local bandwidth passes every held-out case."""
+
+    by_case_and_closure = {
+        (str(row["case"]), str(row["closure"])): row for row in heldout_rows
+    }
+    closure = f"local_b{modal_bandwidth}"
+    candidates = [
+        row for row in heldout_rows if str(row["closure"]) == closure
+    ]
+    if not candidates:
+        return False
+    return all(
+        _structured_closure_noninferiority_pass(
+            candidate,
+            by_case_and_closure[(str(candidate["case"]), "dense")],
+            by_case_and_closure[(str(candidate["case"]), "sampling_floor")],
+        )
+        for candidate in candidates
+    )
 
 
 def _add_shared_arguments(
@@ -1839,6 +1922,8 @@ def run_operating_point_study(args: argparse.Namespace) -> int:
         stability_safety=args.stability_safety,
         seed=args.seed,
         isolate_peak_rss=not args.no_isolate_peak_rss,
+        closure=args.closure,
+        modal_bandwidth=DEFAULT_LOCAL_MODAL_BANDWIDTH,
     )
     benchmark_csv = write_operating_point_benchmark_csv(records, args.csv_output)
 
@@ -1914,10 +1999,15 @@ def run_operating_point_study(args: argparse.Namespace) -> int:
             handoff_time=handoff_time,
             seed=args.seed + 300_000 + point_index,
         )
+        completion_readout = (
+            "local_persistent_unresolved_completion_simplex_bank"
+            if args.closure == "local_persistent"
+            else "persistent_unresolved_completion_simplex_bank"
+        )
         completed = apply_readout_ensemble(
             raw,
             config,
-            readout="local_persistent_unresolved_completion_simplex_bank",
+            readout=completion_readout,
             retained_modes=modes,
             completion_start_time=handoff_time,
             completion_rank=completion_rank,
@@ -2007,6 +2097,7 @@ def run_operating_point_study(args: argparse.Namespace) -> int:
 
     summary = {
         "recommended_default": recommended_name,
+        "completion_closure": args.closure,
         "selection_rule": (
             "lowest amortized runtime among points whose mean normalized "
             "distribution score is within one reference sampling-floor score "
@@ -2135,7 +2226,13 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
         return {
             **distribution.as_dict(),
             "mean_relative_l2_error": moment.mean_relative_l2_error,
+            "mean_max_time_relative_l2_error": (
+                moment.mean_max_time_relative_l2_error
+            ),
             "variance_relative_l2_error": moment.variance_relative_l2_error,
+            "variance_max_time_relative_l2_error": (
+                moment.variance_max_time_relative_l2_error
+            ),
             "covariance_relative_frobenius_error": float(
                 moment.covariance_relative_frobenius_error
             ),
@@ -2224,8 +2321,8 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
     accuracy_rows.append(
         {"closure": "dense", "modal_bandwidth": 0, **dense_metrics}
     )
+    dense_runs = dense.runs
     del dense
-    gc.collect()
 
     for bandwidth_index, bandwidth in enumerate(sorted(set(args.bandwidths))):
         local = apply_readout_ensemble(
@@ -2248,6 +2345,21 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
             start_step=int(np.searchsorted(base_config.times, handoff_time)),
             seed=args.seed,
         )
+        difference_intervals = paired_bootstrap_error_difference_intervals(
+            discrete_expected_diffusion(base_config),
+            multinomial_marginal_variance(base_config),
+            dense_runs,
+            local.runs,
+            reference_covariance=multinomial_marginal_covariance(base_config),
+            covariance_time_indices=time_indices,
+            n_resamples=args.comparison_bootstrap_resamples,
+            confidence_level=args.comparison_confidence_level,
+            n_blocks=args.comparison_bootstrap_blocks,
+            seed=args.seed + 50_000 + bandwidth_index,
+        )
+        for metric, (lower, upper) in difference_intervals.items():
+            local_metrics[f"{metric}_difference_ci_lower"] = lower
+            local_metrics[f"{metric}_difference_ci_upper"] = upper
         accuracy_rows.append(
             {
                 "closure": f"local_b{bandwidth}",
@@ -2258,27 +2370,12 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
         del local
         gc.collect()
 
-    acceptance_metrics = (
-        "mean_relative_l2_error",
-        "variance_relative_l2_error",
-        "covariance_relative_frobenius_error",
-        "cross_time_covariance_relative_frobenius_error",
-        "marginal_normalized_wasserstein",
-        "sliced_normalized_wasserstein",
-    )
+    del dense_runs
+    gc.collect()
+
     eligible: list[dict[str, float | int | str | None]] = []
     for row in accuracy_rows[2:]:
-        if all(
-            float(row[metric])
-            <= float(dense_metrics[metric])
-            + (
-                0.25
-                if metric == "cross_time_covariance_relative_frobenius_error"
-                else 1.0
-            )
-            * float(floor[metric])
-            for metric in acceptance_metrics
-        ):
+        if _structured_closure_noninferiority_pass(row, dense_metrics, floor):
             eligible.append(row)
     if eligible:
         selected_row = min(eligible, key=lambda row: int(row["modal_bandwidth"]))
@@ -2289,10 +2386,14 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
                 [
                     float(row[metric])
                     / max(float(dense_metrics[metric]), 1.0e-12)
-                    for metric in acceptance_metrics
+                    for metric in STRUCTURED_CLOSURE_ACCEPTANCE_METRICS
                 ]
             ),
         )
+    base_candidate_bandwidths = sorted(
+        int(row["modal_bandwidth"])
+        for row in (eligible if eligible else [selected_row])
+    )
     selected_bandwidth = int(selected_row["modal_bandwidth"])
     write_rows(
         [dict(row) for row in accuracy_rows],
@@ -2350,6 +2451,12 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
             seed=args.seed + 100_000 + case_index,
             method="multinomial",
         )
+        reference_floor = run_random_walk_ensemble(
+            config,
+            n_runs=args.heldout_runs,
+            seed=args.seed + 105_000 + case_index,
+            method="multinomial",
+        )
         case_raw = run_modal_ensemble(
             config,
             n_runs=args.heldout_runs,
@@ -2359,15 +2466,46 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
             handoff_time=case_handoff,
             seed=args.seed + 110_000 + case_index,
         )
-        for closure_index, (closure_name, readout) in enumerate(
+        comparison_seed = args.seed + case_index
+        case_floor = evaluate_runs(
+            config,
+            reference.runs,
+            reference_floor.runs,
+            time_indices=case_times,
+            node_indices=case_nodes,
+            start_step=int(np.searchsorted(config.times, case_handoff)),
+            seed=comparison_seed,
+        )
+        heldout_rows.append(
+            {
+                "case": case_name,
+                "closure": "sampling_floor",
+                "nodes": nodes,
+                "particles": particles,
+                "impulse_fraction": impulse_fraction,
+                "diffusion": diffusion,
+                "length": length,
+                "runs": args.heldout_runs,
+                **case_floor,
+            }
+        )
+        dense_case_runs: np.ndarray | None = None
+        closure_candidates = [
             (
-                ("dense", "persistent_unresolved_completion_simplex_bank"),
+                "dense",
+                "persistent_unresolved_completion_simplex_bank",
+                0,
+            ),
+            *(
                 (
-                    f"local_b{selected_bandwidth}",
+                    f"local_b{bandwidth}",
                     "local_persistent_unresolved_completion_simplex_bank",
-                ),
-            )
-        ):
+                    bandwidth,
+                )
+                for bandwidth in base_candidate_bandwidths
+            ),
+        ]
+        for closure_name, readout, closure_bandwidth in closure_candidates:
             completed = apply_readout_ensemble(
                 case_raw,
                 config,
@@ -2376,7 +2514,11 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
                 completion_start_time=case_handoff,
                 completion_rank=case_rank,
                 completion_ridge=args.completion_ridge,
-                completion_bandwidth=selected_bandwidth,
+                completion_bandwidth=(
+                    selected_bandwidth
+                    if closure_name == "dense"
+                    else closure_bandwidth
+                ),
                 seed=args.seed + 120_000 + case_index,
             )
             metrics = evaluate_runs(
@@ -2386,8 +2528,33 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
                 time_indices=case_times,
                 node_indices=case_nodes,
                 start_step=int(np.searchsorted(config.times, case_handoff)),
-                seed=args.seed + closure_index,
+                seed=comparison_seed,
             )
+            if closure_name == "dense":
+                dense_case_runs = completed.runs
+            else:
+                if dense_case_runs is None:
+                    raise RuntimeError("dense closure must be evaluated first")
+                difference_intervals = paired_bootstrap_error_difference_intervals(
+                    discrete_expected_diffusion(config),
+                    multinomial_marginal_variance(config),
+                    dense_case_runs,
+                    completed.runs,
+                    reference_covariance=multinomial_marginal_covariance(config),
+                    covariance_time_indices=case_times,
+                    n_resamples=args.comparison_bootstrap_resamples,
+                    confidence_level=args.comparison_confidence_level,
+                    n_blocks=args.comparison_bootstrap_blocks,
+                    seed=(
+                        args.seed
+                        + 130_000
+                        + 1_000 * case_index
+                        + closure_bandwidth
+                    ),
+                )
+                for metric, (lower, upper) in difference_intervals.items():
+                    metrics[f"{metric}_difference_ci_lower"] = lower
+                    metrics[f"{metric}_difference_ci_upper"] = upper
             heldout_rows.append(
                 {
                     "case": case_name,
@@ -2403,8 +2570,23 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
             )
             del completed
             gc.collect()
-        del reference, case_raw
+        del reference, reference_floor, case_raw, dense_case_runs
         gc.collect()
+    heldout_pass_by_bandwidth = {
+        bandwidth: _structured_heldout_bandwidth_passes(
+            [dict(row) for row in heldout_rows],
+            bandwidth,
+        )
+        for bandwidth in base_candidate_bandwidths
+    }
+    heldout_eligible_bandwidths = [
+        bandwidth
+        for bandwidth in base_candidate_bandwidths
+        if heldout_pass_by_bandwidth[bandwidth]
+    ]
+    heldout_pass = bool(eligible) and bool(heldout_eligible_bandwidths)
+    if heldout_eligible_bandwidths:
+        selected_bandwidth = min(heldout_eligible_bandwidths)
     write_rows(
         [dict(row) for row in heldout_rows],
         output_directory / "heldout_accuracy.csv",
@@ -2509,40 +2691,42 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
     local_largest = next(
         row for row in local_benchmark if row.n_nodes == largest_node
     )
-    heldout_pass = all(
-        all(
-            float(row[metric])
-            <= float(
-                next(
-                    dense_row[metric]
-                    for dense_row in heldout_rows
-                    if dense_row["case"] == row["case"]
-                    and dense_row["closure"] == "dense"
-                )
-            )
-            + float(floor[metric])
-            for metric in acceptance_metrics
-        )
-        for row in heldout_rows
-        if str(row["closure"]).startswith("local")
+    trajectory_runtime_pass = (
+        local_largest.median_run_seconds
+        <= 1.05 * dense_largest.median_run_seconds
     )
     scaling_pass = (
         local_largest.setup_seconds < dense_largest.setup_seconds
         and local_largest.resident_array_bytes < dense_largest.resident_array_bytes
         and local_largest.peak_rss_bytes <= 1.05 * dense_largest.peak_rss_bytes
+        and trajectory_runtime_pass
     )
     accepted = bool(eligible) and heldout_pass and scaling_pass
+    plotted_heldout_rows = [
+        row
+        for row in heldout_rows
+        if str(row["closure"])
+        in {"sampling_floor", "dense", f"local_b{selected_bandwidth}"}
+    ]
     figure = plot_structured_closure_study(
         accuracy_rows,
-        heldout_rows,
+        plotted_heldout_rows,
         benchmark_records,
         output_directory / "structured_closure.png",
     )
     summary = {
-        "selected_bandwidth": selected_bandwidth,
+        "selected_bandwidth": (
+            selected_bandwidth if heldout_pass else None
+        ),
+        "profiled_local_bandwidth": selected_bandwidth,
         "base_accuracy_eligible": bool(eligible),
         "heldout_pass": heldout_pass,
+        "heldout_pass_by_bandwidth": {
+            str(bandwidth): passed
+            for bandwidth, passed in heldout_pass_by_bandwidth.items()
+        },
         "scaling_pass": scaling_pass,
+        "trajectory_runtime_pass": trajectory_runtime_pass,
         "accepted_as_default": accepted,
         "production_default": (
             f"local_persistent_bandwidth_{selected_bandwidth}"
@@ -2551,11 +2735,17 @@ def run_structured_closure_study(args: argparse.Namespace) -> int:
         ),
         "accuracy_runs": args.accuracy_runs,
         "heldout_runs": args.heldout_runs,
+        "case_specific_sampling_floors": True,
+        "comparison_bootstrap_resamples": args.comparison_bootstrap_resamples,
+        "comparison_bootstrap_blocks": args.comparison_bootstrap_blocks,
+        "comparison_confidence_level": args.comparison_confidence_level,
         "distribution_times": selected_times,
         "largest_grid": {
             "nodes": largest_node,
             "dense_setup_seconds": dense_largest.setup_seconds,
             "local_setup_seconds": local_largest.setup_seconds,
+            "dense_median_run_seconds": dense_largest.median_run_seconds,
+            "local_median_run_seconds": local_largest.median_run_seconds,
             "dense_resident_mib": dense_largest.resident_array_megabytes,
             "local_resident_mib": local_largest.resident_array_megabytes,
             "dense_peak_rss_mib": dense_largest.peak_rss_megabytes,
@@ -3066,6 +3256,12 @@ def build_parser() -> argparse.ArgumentParser:
     operating_points.add_argument("--diffusion", type=float, default=2.20e-4)
     operating_points.add_argument("--impulse-fraction", type=float, default=0.59)
     operating_points.add_argument("--completion-ridge", type=float, default=0.01)
+    operating_points.add_argument(
+        "--closure",
+        choices=("dense_persistent", "local_persistent"),
+        default=DEFAULT_COMPLETION_CLOSURE,
+        help="Analytic completion closure used consistently for accuracy and timing.",
+    )
     operating_points.add_argument("--repeats", type=int, default=3)
     operating_points.add_argument("--amortization-runs", type=int, default=100)
     operating_points.add_argument("--stability-safety", type=float, default=0.95)
@@ -3144,6 +3340,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     structured.add_argument("--projections", type=int, default=64)
     structured.add_argument("--histogram-bins", type=int, default=30)
+    structured.add_argument(
+        "--comparison-bootstrap-resamples",
+        type=int,
+        default=200,
+        help="Paired block-bootstrap resamples for closure-minus-dense moment errors.",
+    )
+    structured.add_argument(
+        "--comparison-bootstrap-blocks",
+        type=int,
+        default=20,
+        help="Independent trajectory blocks used by paired comparison intervals.",
+    )
+    structured.add_argument(
+        "--comparison-confidence-level",
+        type=float,
+        default=0.95,
+        help="Confidence level for paired closure noninferiority intervals.",
+    )
     structured.add_argument("--seed", type=int, default=6)
     structured.add_argument(
         "--output-directory",

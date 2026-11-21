@@ -9,8 +9,9 @@ Laplacian eigenbasis instead of by explicitly tracking particles. The project
 has progressed from the original independent-mode formulation to correlated
 modal dynamics, physically constrained banking, adaptive modal reduction, and
 Gaussian readouts for reconstructing unresolved modes. The package, command
-line workflows, analytic references, diagnostics, and 91 tests are complete and
-passing. A five-part presentation experiment suite was completed in July 2026.
+line workflows, analytic references, diagnostics, and 107 tests are complete
+and passing. The initial five-part presentation suite has since expanded into
+the 18 experiments summarized below.
 
 The main scientific conclusion is that mean propagation is no longer the core
 problem. The full correlated model reproduces the multinomial reference's mean,
@@ -23,14 +24,19 @@ faster than the aggregated multinomial baseline.
 
 ## Where we left off
 
-The canonical presentation outputs are in
-`outputs/presentation/`, and `run_presentation_results.sh` defines that
-pipeline. All 91 automated tests pass.
+The baseline presentation outputs are in `outputs/presentation/`, and
+`run_presentation_results.sh` defines that pipeline. The current structured
+closure decision is in `outputs/structured_closure_hardened/`; the current
+resolution study is in `outputs/mode_scaling/`, with the independent finalist
+confirmation in `completion_finalist_r250_fresh/`. These later artifacts
+supersede the earlier local-closure selection. All 107 automated tests pass.
 
 Time-resolved errors, bootstrap uncertainty, and a 5,000-trial convergence
 study, predictive handoff/rank rule, completion-rank study, exact pipeline
-benchmark, and distribution-level comparison are now complete. The next phase
-has replaced the dense gain with a validated bandwidth-12 structured closure.
+benchmark, and distribution-level comparison are now complete. The local gain
+has been rewritten with exact restricted covariance blocks, but a statistically
+hardened rerun rejects bandwidths 12 and 20 on long-domain lag covariance; dense
+persistent completion is therefore the production default.
 The first frozen trajectory-fitted replacement was implemented and rejected by
 the predeclared accuracy and runtime gates. Its anchor-conditioned successor
 was also implemented and tested; it improved accuracy and runtime but still
@@ -41,6 +47,10 @@ The first jointly physics-conditioned regression and configuration-level
 cross-validation study are also complete; they improve some errors but do not
 pass the frozen gates. The final 16-anchor target-conditioned candidate failed
 its pre-lockbox CV gate, so the new unbiased lockbox remains unopened.
+A resolution-aware 101/151/201-node study is also complete. Plateauing retained
+mode rules fail with fixed completion rank 5. Fixed 75 retained modes becomes
+noninferior with completion rank 20, but setup, retained storage, and trajectory
+time are not better than the proportional rank-5 baseline.
 
 ## Completed work
 
@@ -60,8 +70,13 @@ its pre-lockbox CV gate, so the new unbiased lockbox remains unopened.
   bootstrap uncertainty intervals, and a nested trial-count convergence CLI.
 - Added isolated peak-RSS scaling and marginal/sliced distribution metrics for
   the three selected completed pipelines.
-- Added a row-sparse local persistent closure, profiling, held-out validation,
-  and isolated scaling; bandwidth 12 is now the selected-pipeline default.
+- Added a row-sparse local persistent closure, exact restricted-block covariance
+  assembly, profiling, held-out validation, and isolated scaling. The local
+  closure is retained as a memory experiment; dense completion is the default.
+- Added case-specific sampling floors, identical sliced projections, paired
+  noninferiority intervals, worst-time gates, and an explicit runtime gate.
+- Added resolution-aware proportional/fixed/spectral/mean-cutoff studies and a
+  completion-rank/bandwidth follow-up at 101--201 nodes.
 - Added a frozen trajectory-fitted sparse closure and tested it on unseen
   physics; it remains experimental because variance, covariance, temporal, and
   runtime gates failed.
@@ -76,7 +91,8 @@ its pre-lockbox CV gate, so the new unbiased lockbox remains unopened.
 - Froze a new six-case lockbox, added four bridge anchors and target-level
   modal/time conditioning, and enforced a pre-lockbox CV gate; the candidate
   failed and stopped before lockbox evaluation.
-- Generated five presentation figures with CSV data and supporting NPZ arrays.
+- Generated the baseline presentation figures with CSV data and supporting NPZ
+  arrays, plus hardened closure and mode-scaling artifacts.
 
 ## Experiments completed
 
@@ -93,7 +109,7 @@ wall-clock measurement and is not an ensemble trial.
 | 4. Temporal-correlation comparison | Multinomial reference, full correlated, raw 101-to-50 handoff, independent completion, and persistent completion; lags 1, 2, 5, 10, 20 | 101 initial modes; 50 retained; handoff/completion at step 10; completion rank 10; 500 trials; seed 3 | Test whether fluctuations persist correctly through time. Same-time mean and covariance alone cannot distinguish independent redraws from a dynamically consistent unresolved process. |
 | 5. End-to-end performance | Multinomial, full correlated, raw handoff, independent completion, and persistent completion | Node sweep 31/51/101/151 with full ranks 31/51/101/151 and reduced ranks 16/26/50/76; particle sweep 1,000/5,275/10,000 at 101-to-50 modes; 5 timing repeats; seed 4 | Measure setup time, trajectory time, amortized time, and resident NumPy-array storage. Determine whether modal reduction creates an actual computational benefit rather than only reducing the nominal modal state. |
 | 6. Trial-count convergence | Multinomial reference; independent, correlated, and banked correlated modal models | 101 modes; nested prefixes of 100, 250, 500, 1,000, 2,000, and 5,000 trials; 200 block-bootstrap resamples; seed 20 | Separate finite-ensemble noise from structural model error, quantify uncertainty, and make the independent model's sampled-mean error directly visible. |
-| 7. Predictive handoff selection | Analytic modal-energy predictor validated against correlated handoff ensembles | 35, 50, 60, 75 retained modes; handoff steps 10, 15, 20, 30; 16 held-out configurations; 250 trials each | Predict post-handoff mean, variance, and covariance loss before running an ensemble and identify the accuracy/work Pareto frontier. |
+| 7. Predictive handoff selection | Analytic modal-energy predictor validated against correlated handoff ensembles | 35, 50, 60, 75 retained modes; handoff steps 10, 15, 20, 30; 16 candidate handoff/rank combinations on one physical configuration; 250 trials each | Predict post-handoff mean, variance, and covariance loss before running an ensemble and identify the accuracy/work Pareto frontier. |
 | 8. Completion and physical-output selection | Independent/persistent completion, with and without simplex banking | Completion-rank sweeps plus 500-trial headline checks at 35/50/75 modes | Select completion rank for compute/balanced/accuracy operating points and test whether nonnegativity and mass conservation distort stochastic moments. |
 | 9. Selected-pipeline scaling and distribution comparison | Persistent completion plus simplex banking at compute-first, balanced, and accuracy-first operating points | Node sweep 51/101/151/201; 3 isolated timing repeats per point; 500 trials per point at 101 nodes; 64 sliced projections; seed 5 | Measure full-pipeline runtime, setup, retained arrays, peak RSS, marginal Jensen--Shannon/Wasserstein distance, and full-vector sliced Wasserstein distance; select a default using accuracy and measured cost. |
 | 10. Structured-closure selection | Dense persistent closure versus local modal bandwidths 4/8/12/20 at the accuracy-first operating point | 500 base trials; five held-out cases with 250 trials each; node scaling 51/101/151/201; 3 timing repeats; seed 6 | Replace dense time-indexed gains, test out-of-sample robustness, and require lower setup/storage/peak RSS without distribution error beyond the sampling-floor allowance. |
@@ -102,6 +118,9 @@ wall-clock measurement and is not an ensemble trial.
 | 13. Exact-anchor and persistent-innovation ablation | Rank 4/8/12/20 innovation factors at all 12 exact anchors; leave-one-anchor-out regressions; stable conditional residual dynamics; batched completion | All anchor residuals and five time bins; fresh 100-run ensembles at representative 51/101/201-node exact anchors; repeated frozen 500/250 and scaling gates; seed 7 | Separate innovation compression, temporal persistence, and coefficient-transfer error, then test whether conditional innovations and batching close the remaining accuracy and runtime gaps. |
 | 14. Physics-conditioned fitted closure | One joint local regression conditioned on normalized grid size, impulse fraction, and dimensionless diffusion time; linear versus quadratic configuration-level cross-validation | 12 anchors with 100 trials each; three complete-configuration folds; identical frozen 500-trial base, five 250-trial held-outs, and 51/101/151/201 scaling; seed 7 | Avoid interpolation of unstable coefficient coordinates, select conditioning complexity without trajectory leakage, and use the error map to design targeted bridge anchors. |
 | 15. Target-conditioned pre-lockbox gate | Physics-conditioned regression plus modal index, modal decay, retained fraction, and time-since-handoff features; four targeted bridge anchors | 16 anchors with 100 trials each; four complete-configuration folds; predeclared mean/max CV gates of 0.87/1.05; lockbox frozen but not opened | Test whether targeted coverage and target-level physics produce the required 20% transfer improvement before spending the new unbiased lockbox or optimizing runtime. |
+| 16. Hardened structured-closure rerun | Dense persistent closure versus every base-eligible local bandwidth, with matched projection directions and case-specific reference floors | 500 base trials; five held-outs with 250 trials each; 200 paired bootstrap resamples; 7 timing repeats; bandwidths 12 and 20 carried through held-out validation | Correct the permissive promotion logic and determine whether local memory savings survive a statistically fair temporal-transfer gate. |
+| 17. Resolution-aware mode scaling | Proportional retention, fixed 75, continuum spectral cutoff, and exact discrete post-handoff mean cutoff, each followed by local persistent completion | 101/151/201 nodes; 250 trials per policy/grid; two independent references per grid; 200 paired bootstrap resamples | Test whether retained dynamical modes can plateau with spatial refinement while analytic completion restores the unresolved stochastic field. |
+| 18. Completion-rank/bandwidth scaling | Fixed 75 retained modes with ranks 5/10/20 and bandwidths 12/20 against the proportional rank-5 baseline | 100-trial factorial screen with seed 20261120; rank-20/bandwidth-12 finalist independently repeated for 250 trials with seed 20261121; 7 timing repeats in physical-refinement and fixed-step regimes | Determine whether mode-count growth can be traded for unresolved completion rank and whether that trade produces an actual computational benefit. |
 
 The original presentation suite did not include the completion-rank and
 selected-pipeline studies; both have now been completed separately.
@@ -144,6 +163,25 @@ selected-pipeline studies; both have now been completed separately.
    errors were 0.00179/2.876/2.667. Its sampled mean error was 3.23 times the
    multinomial reference standard-error norm, largely because its fluctuations
    are overdispersed; its expected mean update remains analytically correct.
+8. **The local closure is a memory result, not the production accuracy
+   default.** Bandwidths 12 and 20 pass the 500-trial base gate and four of five
+   held-outs, but both fail long-domain lag covariance. Their errors are 0.1545
+   and 0.1176 versus 0.0912 for dense; the allowed case-specific difference is
+   0.0183. Dense persistent completion is therefore the default.
+9. **Mean-relevant modes nearly plateau, but stochastic completion does not.**
+   The exact 0.5% worst-time post-handoff mean cutoff selects 35/34/33 modes at
+   101/151/201 nodes, while the proportional rule selects 75/112/149. With
+   completion rank 5, the low-mode policies fail variance and temporal gates
+   as the grid is refined.
+10. **Fixed retained modes can recover accuracy by increasing completion rank,
+    but not current performance.** On the base length-4 domain under local
+    analytic completion, fixed 75 modes with rank 20 passes an independent
+    fresh-seed 250-trial noninferiority gate at 151 and 201 nodes. At 201 nodes,
+    its variance/covariance/lag errors are 0.0957/0.3207/0.1003 versus
+    0.0977/0.3264/0.0902 for the proportional baseline. It takes 2.80 s to set
+    up, retains 16.4 MiB, and runs in 0.1429 s, versus 1.00 s, 6.8 MiB, and
+    0.1403 s for proportional modes with rank 5. This is a scaling experiment,
+    not a replacement for the dense production closure.
 
 ## Completed follow-up
 
@@ -182,13 +220,14 @@ is temporary dense linear-algebra workspace and the time-indexed analytic
 completion construction, so modal rank reduction alone will not deliver a
 scalable implementation.
 
-The structured follow-up resolves most of that implementation bottleneck.
-Bandwidth 12 produced normalized sliced Wasserstein error 0.0802 versus 0.0807
-for dense completion on 500 trials and passed all five held-out distribution
-checks. At 201 nodes it reduced retained arrays from 27.72 to 9.99 MiB, sampled
-peak RSS from 433.01 to 85.75 MiB, and setup time from 1.195 to 1.117 seconds.
-It is therefore the selected-pipeline default. The dense closure is retained
-as a reproducible scientific reference.
+The structured follow-up resolves most of the memory bottleneck but does not
+pass the hardened transfer gate. Bandwidth 12 produced normalized sliced
+Wasserstein error 0.0802 versus 0.0807 for dense completion on 500 trials. At
+201 nodes it reduced retained arrays from 27.72 to 9.99 MiB and sampled peak RSS
+from 435.46 to 88.23 MiB. Case-specific floors and paired intervals expose a
+long-domain lag-covariance failure, however: bandwidths 12 and 20 give errors
+0.1545 and 0.1176 versus 0.0912 for dense. Dense completion is therefore the
+production default; local completion remains an explicit memory experiment.
 
 The first fitted replacement did not pass. On the unseen 500-trial base case,
 its variance/covariance/lag-1 errors were 0.230/0.412/0.366, compared with
@@ -196,7 +235,8 @@ acceptance thresholds 0.129/0.337/0.145. Similar temporal and covariance
 failures appeared on unseen impulses, particle counts, diffusivity, grid, and
 domain tests. Fitted setup at 201 nodes fell to 0.038 seconds, but trajectory
 time increased to 0.714 seconds versus 0.162 seconds for analytic-local. The
-analytic bandwidth-12 closure therefore remains the production default.
+dense analytic completion is now the production default after the later
+hardened held-out rerun.
 
 The anchor-conditioned successor improved the unseen-base
 variance/covariance/lag-1 errors to 0.208/0.380/0.339 and sliced Wasserstein
@@ -236,26 +276,42 @@ or promotion benchmark was performed for this rejected candidate.
 
 ## Ordered next steps
 
-### 1. Retain the analytic bandwidth-12 closure for the current project
+### 1. Retain dense analytic persistent completion for production comparisons
 
-The fitted line has now isolated and tested global sharing, anchor
-interpolation, low-rank innovations, persistent residuals, bridge anchors, and
-target-level physical conditioning. The local linear architecture still does
-not transfer adequately, so more anchors or trials are not justified.
+The hardened comparison rejects local bandwidths 12 and 20 only on long-domain
+lag covariance, but scientific transfer takes precedence over their memory
+savings. Keep local completion as an explicit research option.
 
-### 2. Preserve the lockbox for a genuinely different architecture
+### 2. Derive and optimize the completion-rank scaling rule
+
+Fixed 75 retained modes with local bandwidth-12 completion and rank 20 passes
+the 250-trial screen through 201 nodes, but its current setup/storage costs
+erase the reduced-dynamics benefit. Measure the conditional innovation
+spectrum across resolution, select rank from a predeclared captured-energy
+tolerance, and replace dense unresolved
+eigendecompositions with a matrix-free low-rank factor if the spectrum permits.
+
+### 3. Repair long-domain temporal localization before promoting local closure
+
+Bandwidth 20 narrows the long-domain lag-error gap but still misses the gate.
+Test physically normalized neighborhoods or an explicit low-rank nonlocal
+temporal correction; do not merely loosen the temporal margin.
+
+### 4. Preserve the lockbox for a genuinely different learned architecture
 
 Do not inspect `configs/fitted_closure_lockbox.csv` through model evaluation.
 If the learned-closure effort continues, first specify a nonlinear conditional
 operator, analytic-teacher distillation, or another materially different model
 and pass configuration CV before opening the lockbox.
 
-### 3. Finish the scientific synthesis and presentation
+### 5. Finish the scientific synthesis and presentation
 
 Present the negative fitted studies as a controlled result: innovation rank is
-adequate, exact-anchor behavior is substantially better, and transfer of the
-conditional operator is the unresolved limitation. Keep the validated analytic
-local closure and its scaling results as the final recommended pipeline.
+adequate at the fitted anchors, exact-anchor behavior is substantially better,
+and transfer of the conditional operator is the unresolved learned-model
+limitation. Present dense completion as the trusted physics reference, the
+local closure as a memory/transfer tradeoff, and the fixed-mode/rank-20 result
+as accurate but not yet computationally advantageous.
 
 # Appendix A: mathematical framework
 
@@ -316,7 +372,10 @@ fraction of negative entries, negative mass divided by total mass, physical
 bound/integer violations, and bank/completion residual magnitude. Cross-time
 covariance uses the same relative Frobenius norm at each lag. Finite ensembles
 give the multinomial reference nonzero empirical error, which is a useful noise
-floor rather than a model defect.
+floor rather than a model defect. The worst-time variance score excludes saved
+times whose exact variance norm is at most `1e-12` of its maximum; this removes
+the deterministic initial frame and roundoff-scale denominators without
+discarding physically stochastic times.
 
 # Appendix B: model theory and experiment hypotheses
 
@@ -496,12 +555,15 @@ are drawn and the normalized one-dimensional Wasserstein distances of
 `theta^T n` are averaged. Removing the constant direction prevents exact mass
 conservation from dominating the sliced metric.
 
-The default-selection score is the mean of normalized marginal and sliced
+For the historical three-operating-point screen, the default-selection score
+is the mean of normalized marginal and sliced
 Wasserstein distance. A pipeline is accuracy-eligible if its score lies within
 one independently measured multinomial-versus-multinomial sampling-floor score
 of the best pipeline. The eligible point with the smallest 100-run-amortized
 runtime is selected. Under the 500-trial study, all three points were eligible
-and accuracy-first was fastest.
+and accuracy-first was fastest. The later dense-versus-local promotion decision
+uses the stricter case-specific, paired noninferiority gates described next;
+the earlier heuristic does not override that result.
 
 # Appendix E: structured local persistent closure
 
@@ -525,8 +587,17 @@ stored as index/value arrays. Sparse gain application is therefore
 rather than multiplication by a dense time-indexed matrix. The innovation
 covariance remains `C_uu - K C_yu` and is sampled through the same configurable
 low-rank factor. With `b` spanning every modal index, this construction is
-numerically equivalent to the dense persistent closure. Experiment 10 selected
-`b = 12` under the declared sampling-floor accuracy and scaling gates.
+numerically equivalent to the dense persistent closure. The original
+Experiment 10 screen profiled `b = 12`, but the hardened Experiment 16
+comparison carried both base-eligible bandwidths (`b = 12` and `b = 20`)
+through all held-out cases. Both failed the long-domain lag-covariance gate, so
+neither local bandwidth was selected and the dense closure remains the
+production default. For each held-out physical case, a second independent
+multinomial ensemble defines the finite-sample error floor. Candidate-minus-
+dense differences in mean, variance, and covariance error use paired
+block-bootstrap confidence intervals; temporal and distributional margins are
+scaled from that same case-specific floor. Projection directions are identical
+for reference, dense, and local comparisons.
 
 # Appendix F: frozen trajectory-fitted closure
 
@@ -678,3 +749,60 @@ the workflow returned after writing `prelockbox_summary.json`; it did not load
 the lockbox manifest into validation, generate lockbox trajectories, or run a
 candidate scaling benchmark. This preserves the lockbox for a materially new
 future architecture and prevents repeated adaptation to the final test set.
+
+# Appendix K: resolution-aware mode and completion scaling
+
+For a handoff at time `t_h`, let `a_k = 1 - dt lambda_k` be the exact
+discrete-time decay factor and let `mu_k(t)` denote the deterministic modal
+mean. The exact mean-cutoff policy chooses the smallest retained count `M`
+such that the worst post-handoff projection error satisfies
+
+```text
+max_(t >= t_h) ||V_(k>=M) mu_(k>=M)(t)||_2 / ||V mu(t)||_2 <= epsilon_mean.
+```
+
+The continuum comparison uses `exp(-D (pi k/L)^2 t_h) <= epsilon_decay`, which
+gives the approximate cutoff
+
+```text
+M >= L / (pi sqrt(D t_h)) sqrt(log(1 / epsilon_decay)).
+```
+
+These rules concern deterministic mean decay only. The exact multinomial modal
+covariance is
+
+```text
+C_m(t) = V^T N (diag(p_t) - p_t p_t^T) V,
+```
+
+so high modes can remain important to stochastic variance even after their
+means have decayed. Experiment 17 tests whether analytic unresolved completion
+can restore that covariance while the retained dynamics plateau.
+
+Each resolution receives two independent multinomial references, so its
+sampling floor matches the physical case and trial count. The candidate and
+proportional baseline share projection directions, and paired block-bootstrap
+intervals are applied to differences in mean, variance, and covariance error.
+Worst-time, temporal, distributional, mass, and nonnegativity checks use the
+same case-specific sampling-floor noninferiority margins.
+
+Experiment 18 separates two approximation dimensions:
+
+```text
+M = number of modes advanced dynamically,
+r = rank of the conditional unresolved innovation factor.
+```
+
+Holding `M = 75` while increasing `r` from 5 to 20 tests whether stochastic
+resolution can move from the dynamic state into the analytic readout. The
+250-trial result shows that it can recover accuracy at 151 and 201 nodes, but
+not yet reduce cost. The scaling decision therefore requires both an accuracy
+gate and measured setup, trajectory, and resident-storage gates; fewer dynamic
+modes alone are not evidence of a faster reduced model.
+
+Two timing regimes separate spatial algebra from timestep refinement. Physical
+refinement holds domain, diffusivity, stability safety, and final physical time
+fixed, so finer grids require more stable time steps. Fixed-step timing holds
+the number of transitions fixed at 100 and reports seconds per transition.
+Agreement between the regimes distinguishes spatial cost from the unavoidable
+increase in step count of an explicit diffusion discretization.

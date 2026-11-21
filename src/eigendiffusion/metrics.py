@@ -92,12 +92,19 @@ def relative_l2_error_from_time(
 def time_resolved_relative_l2_error(
     reference: FloatArray,
     estimate: FloatArray,
+    *,
+    minimum_reference_norm_fraction: float = 0.0,
 ) -> FloatArray:
     """Return a relative L2 error for every sample along the first axis.
 
     A time with zero reference norm is reported as NaN unless the estimate is
     also exactly zero, in which case its error is zero. This convention is
     useful for multinomial variance, which is identically zero initially.
+
+    When ``minimum_reference_norm_fraction`` is positive, samples whose
+    reference norm is no larger than that fraction of the maximum reference
+    norm are reported as NaN. This prevents roundoff-scale reference values
+    from dominating a worst-time relative error.
     """
 
     reference = np.asarray(reference, dtype=float)
@@ -106,13 +113,18 @@ def time_resolved_relative_l2_error(
         raise ValueError("reference and estimate must have the same shape")
     if reference.ndim < 2:
         raise ValueError("reference and estimate must have at least two dimensions")
+    if not 0.0 <= minimum_reference_norm_fraction < 1.0:
+        raise ValueError("minimum_reference_norm_fraction must be in [0, 1)")
 
     axes = tuple(range(1, reference.ndim))
     numerator = np.sqrt(np.sum((reference - estimate) ** 2, axis=axes))
     denominator = np.sqrt(np.sum(reference**2, axis=axes))
+    minimum_norm = minimum_reference_norm_fraction * float(np.max(denominator))
+    valid = denominator > minimum_norm
     result = np.full(denominator.shape, np.nan, dtype=float)
-    np.divide(numerator, denominator, out=result, where=denominator > 0.0)
-    result[(denominator == 0.0) & (numerator == 0.0)] = 0.0
+    np.divide(numerator, denominator, out=result, where=valid)
+    if minimum_reference_norm_fraction == 0.0:
+        result[(denominator == 0.0) & (numerator == 0.0)] = 0.0
     return result
 
 
@@ -223,6 +235,7 @@ def summarize_ensemble(
     variance_error_by_time = time_resolved_relative_l2_error(
         reference_variance,
         variance,
+        minimum_reference_norm_fraction=1.0e-12,
     )
     mean_error_to_reference_se = _mean_sampling_diagnostics(
         reference_mean,
@@ -398,6 +411,205 @@ def bootstrap_error_intervals(
         center = observed[name]
         intervals[name] = (
             max(0.0, center - z_score * standard_error),
+            center + z_score * standard_error,
+        )
+    return intervals
+
+
+def paired_bootstrap_error_difference_intervals(
+    reference_mean: FloatArray,
+    reference_variance: FloatArray,
+    baseline_runs: FloatArray,
+    candidate_runs: FloatArray,
+    *,
+    reference_covariance: FloatArray | None = None,
+    covariance_time_indices: list[int] | None = None,
+    n_resamples: int = 200,
+    confidence_level: float = 0.95,
+    n_blocks: int = 20,
+    seed: int = 0,
+) -> dict[str, tuple[float, float]]:
+    """Return paired intervals for candidate-minus-baseline moment errors.
+
+    Trajectories with the same run index are treated as a pair. Independent
+    run blocks are resampled with the same bootstrap indices for both models,
+    so shared raw trajectories and random-number streams reduce uncertainty in
+    the comparison instead of being discarded. Negative values favor the
+    candidate; a noninferiority gate compares the interval's upper endpoint
+    with a predeclared tolerance.
+    """
+
+    baseline = np.asarray(baseline_runs, dtype=float)
+    candidate = np.asarray(candidate_runs, dtype=float)
+    reference_mean = np.asarray(reference_mean, dtype=float)
+    reference_variance = np.asarray(reference_variance, dtype=float)
+    if baseline.ndim != 3 or candidate.ndim != 3:
+        raise ValueError("runs must have shape (runs, time, space)")
+    if baseline.shape != candidate.shape:
+        raise ValueError("baseline_runs and candidate_runs must have the same shape")
+    if baseline.shape[1:] != reference_mean.shape:
+        raise ValueError("run dimensions must match reference_mean")
+    if reference_variance.shape != reference_mean.shape:
+        raise ValueError("reference_variance must match reference_mean")
+    if n_resamples <= 0:
+        raise ValueError("n_resamples must be positive")
+    if not 0.0 < confidence_level < 1.0:
+        raise ValueError("confidence_level must lie between zero and one")
+    if n_blocks <= 1:
+        raise ValueError("n_blocks must be greater than one")
+
+    covariance_indices: NDArray[np.int_] | None = None
+    expected_covariance: FloatArray | None = None
+    if reference_covariance is not None or covariance_time_indices is not None:
+        if reference_covariance is None or covariance_time_indices is None:
+            raise ValueError(
+                "reference_covariance and covariance_time_indices must be provided together"
+            )
+        covariance_indices = np.asarray(covariance_time_indices, dtype=int)
+        expected_covariance = np.asarray(reference_covariance, dtype=float)[
+            covariance_indices
+        ]
+
+    blocks = np.array_split(
+        np.arange(baseline.shape[0]),
+        min(n_blocks, baseline.shape[0]),
+    )
+    if len(blocks) <= 1:
+        raise ValueError("at least two runs are required for bootstrap intervals")
+    block_counts = np.asarray([block.size for block in blocks], dtype=int)
+
+    def sufficient_statistics(values: FloatArray) -> tuple[
+        FloatArray,
+        FloatArray,
+        FloatArray | None,
+    ]:
+        sums = np.stack([values[block].sum(axis=0) for block in blocks])
+        sum_squares = np.stack(
+            [np.square(values[block]).sum(axis=0) for block in blocks]
+        )
+        cross_products: FloatArray | None = None
+        if covariance_indices is not None:
+            cross_products = np.stack(
+                [
+                    np.einsum(
+                        "rti,rtj->tij",
+                        values[block][:, covariance_indices, :],
+                        values[block][:, covariance_indices, :],
+                    )
+                    for block in blocks
+                ]
+            )
+        return sums, sum_squares, cross_products
+
+    baseline_statistics = sufficient_statistics(baseline)
+    candidate_statistics = sufficient_statistics(candidate)
+
+    metric_samples: dict[str, list[float]] = {
+        "mean_relative_l2_error": [],
+        "variance_relative_l2_error": [],
+    }
+    if expected_covariance is not None:
+        metric_samples["covariance_relative_frobenius_error"] = []
+
+    def errors_from_blocks(
+        statistics: tuple[FloatArray, FloatArray, FloatArray | None],
+        selected_blocks: NDArray[np.int_],
+        count: int,
+    ) -> dict[str, float]:
+        sums, sum_squares, cross_products = statistics
+        sample_mean = np.sum(sums[selected_blocks], axis=0) / count
+        sample_second_moment = (
+            np.sum(sum_squares[selected_blocks], axis=0) / count
+        )
+        sample_variance = np.maximum(
+            sample_second_moment - sample_mean**2,
+            0.0,
+        )
+        result = {
+            "mean_relative_l2_error": relative_l2_error(
+                reference_mean,
+                sample_mean,
+            ),
+            "variance_relative_l2_error": relative_l2_error(
+                reference_variance,
+                sample_variance,
+            ),
+        }
+        if (
+            expected_covariance is not None
+            and covariance_indices is not None
+            and cross_products is not None
+        ):
+            second_cross = np.sum(cross_products[selected_blocks], axis=0) / count
+            selected_mean = sample_mean[covariance_indices]
+            sample_covariance = second_cross - np.einsum(
+                "ti,tj->tij",
+                selected_mean,
+                selected_mean,
+            )
+            result["covariance_relative_frobenius_error"] = (
+                relative_frobenius_error(expected_covariance, sample_covariance)
+            )
+        return result
+
+    rng = np.random.default_rng(seed)
+    n_available_blocks = len(blocks)
+    for _ in range(n_resamples):
+        selected_blocks = rng.integers(
+            0,
+            n_available_blocks,
+            size=n_available_blocks,
+        )
+        count = int(np.sum(block_counts[selected_blocks]))
+        baseline_errors = errors_from_blocks(
+            baseline_statistics,
+            selected_blocks,
+            count,
+        )
+        candidate_errors = errors_from_blocks(
+            candidate_statistics,
+            selected_blocks,
+            count,
+        )
+        for name in metric_samples:
+            metric_samples[name].append(
+                candidate_errors[name] - baseline_errors[name]
+            )
+
+    def observed_errors(values: FloatArray) -> dict[str, float]:
+        result = {
+            "mean_relative_l2_error": relative_l2_error(
+                reference_mean,
+                np.mean(values, axis=0),
+            ),
+            "variance_relative_l2_error": relative_l2_error(
+                reference_variance,
+                np.var(values, axis=0, ddof=0),
+            ),
+        }
+        if expected_covariance is not None and covariance_indices is not None:
+            result["covariance_relative_frobenius_error"] = (
+                relative_frobenius_error(
+                    expected_covariance,
+                    empirical_covariance(values, covariance_indices),
+                )
+            )
+        return result
+
+    baseline_observed = observed_errors(baseline)
+    candidate_observed = observed_errors(candidate)
+    observed = {
+        name: candidate_observed[name] - baseline_observed[name]
+        for name in metric_samples
+    }
+
+    z_score = NormalDist().inv_cdf(0.5 + confidence_level / 2.0)
+    intervals: dict[str, tuple[float, float]] = {}
+    for name, samples in metric_samples.items():
+        standard_error = float(np.std(samples, ddof=1))
+        center = observed[name]
+        intervals[name] = (
+            center - z_score * standard_error,
             center + z_score * standard_error,
         )
     return intervals

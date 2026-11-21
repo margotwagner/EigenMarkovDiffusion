@@ -1,8 +1,9 @@
 # Structured local persistent closure
 
-The production selected-pipeline closure is now
-`local_persistent_unresolved_completion` with modal bandwidth 12. The previous
-dense persistent closure remains available as the scientific reference.
+The local persistent closure remains a memory-saving research candidate. The
+production selected-pipeline closure is the dense analytic persistent closure:
+after statistical hardening, local bandwidths 12 and 20 both fail the
+long-domain lag-covariance held-out gate.
 
 ## Construction
 
@@ -35,20 +36,24 @@ performs four stages:
 
 1. profiles dense completion and bandwidth candidates 4, 8, 12, and 20;
 2. compares them using 500 shared base trajectories;
-3. validates the selected bandwidth with 250 trials on shifted impulse,
+3. validates every base-eligible bandwidth with 250 trials on shifted impulse,
    particle-count, diffusivity, 151-node, and longer-domain cases;
 4. measures isolated setup, runtime, retained arrays, and sampled peak RSS at
    51, 101, 151, and 201 nodes.
 
-Bandwidth 12 passed the strict accuracy rule. On the 101-node base case, its
+Bandwidths 12 and 20 passed the strict base accuracy rule. On the 101-node base case,
+bandwidth 12's
 normalized sliced Wasserstein error was 0.0802 versus 0.0807 for the dense
 closure. Its lag-1 covariance error was 0.0703 versus 0.0590 for dense. The
 automatic base selector permits only one quarter of the independently measured
 temporal sampling-floor error when choosing bandwidth, preventing a
 distribution-only match from hiding temporal degradation.
 
-All five held-out cases passed thresholds for mean, variance, same-time
-covariance, lag-1 covariance, marginal Wasserstein, and sliced Wasserstein.
+Four of five held-out cases pass. On the long-domain case, dense lag-covariance
+error is 0.0912, while bandwidths 12 and 20 give 0.1545 and 0.1176. Their
+candidate-minus-dense differences are 0.0633 and 0.0263, above the case-specific
+temporal margin of 0.0183. The selector therefore rejects both local candidates
+and falls back to dense completion.
 
 ## Scaling result
 
@@ -56,17 +61,18 @@ At 201 nodes:
 
 | Metric | Dense | Local bandwidth 12 |
 | --- | ---: | ---: |
-| Setup time | 1.195 s | 1.117 s |
+| Setup time | 1.286 s | 1.138 s |
 | Retained arrays | 27.72 MiB | 9.99 MiB |
-| Sampled peak RSS | 433.01 MiB | 85.75 MiB |
+| Sampled peak RSS | 435.46 MiB | 88.23 MiB |
 
-The local closure therefore passed the setup, storage, and peak-memory gates
-and is the default for selected completed-pipeline studies. The dense readout
-names are unchanged so earlier results remain reproducible.
+The local closure passes setup, trajectory-runtime, storage, and peak-memory
+gates, but scientific accuracy takes precedence over those savings. Dense
+persistent completion is therefore the current default. The local readout names
+are unchanged so earlier results remain reproducible.
 
 ## Remaining limitation
 
-This is a structured analytic closure, not yet a learned or standalone
-closure: its local coefficients are still derived from known multinomial
-moments. The next scientific step is fitting the sparse coefficients from
-training trajectories and validating them on the same held-out suite.
+This is a structured analytic closure, not a learned or standalone closure:
+its local coefficients are still derived from known multinomial moments. A
+future local candidate must improve long-domain temporal conditioning before it
+can be promoted; merely widening from 12 to 20 modes is insufficient.

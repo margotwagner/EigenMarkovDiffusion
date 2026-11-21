@@ -167,6 +167,7 @@ python -m eigendiffusion sweep-completion-rank \
 
 echo "9/11 Benchmarking selected pipelines and distribution accuracy..."
 python -m eigendiffusion study-operating-points \
+  --closure dense_persistent \
   --node-counts 51 101 151 201 \
   --accuracy-nodes 101 \
   --particles 5275 \
@@ -193,11 +194,14 @@ python -m eigendiffusion study-structured-closure \
   --accuracy-runs 500 \
   --heldout-runs 250 \
   --bandwidths 4 8 12 20 \
-  --repeats 3 \
+  --repeats 7 \
   --amortization-runs 100 \
   --distribution-times 20 50 100 \
   --distribution-node-offsets -10 0 10 \
   --projections 64 \
+  --comparison-bootstrap-resamples 200 \
+  --comparison-bootstrap-blocks 20 \
+  --comparison-confidence-level 0.95 \
   --seed 6 \
   --output-directory outputs/presentation/10_structured_closure
 
