@@ -301,17 +301,16 @@ class FittedLocalClosureModel:
     def _predict_initial(self, deviations: FloatArray, retained_modes: int) -> FloatArray:
         values = np.asarray(deviations, dtype=float)
         n_nodes = values.shape[-1]
-        width = self.feature_width
-        result = np.zeros((values.shape[0], n_nodes - retained_modes), dtype=float)
-        for output_index, target in enumerate(range(retained_modes, n_nodes)):
-            features = np.zeros((values.shape[0], width), dtype=float)
-            for offset in range(-self.bandwidth, self.bandwidth + 1):
-                source = target + offset
-                if 0 <= source < retained_modes:
-                    features[:, offset + self.bandwidth] = values[:, source]
-            frequency_bin = self.frequency_bin(target, n_nodes)
-            result[:, output_index] = features @ self.initial_coefficients[frequency_bin]
-        return result
+        targets = np.arange(retained_modes, n_nodes)[:, None]
+        sources = targets + np.arange(-self.bandwidth, self.bandwidth + 1)[None, :]
+        valid = (sources >= 0) & (sources < retained_modes)
+        features = values[:, np.clip(sources, 0, n_nodes - 1)] * valid[None, :, :]
+        frequency_bins = np.minimum(
+            self.n_frequency_bins - 1,
+            (targets[:, 0] * self.n_frequency_bins) // max(n_nodes - 1, 1),
+        )
+        coefficients = self.initial_coefficients[frequency_bins]
+        return np.sum(features * coefficients[None, :, :], axis=2)
 
     def _predict_transition(
         self,
@@ -322,23 +321,26 @@ class FittedLocalClosureModel:
         current = np.asarray(current_deviations, dtype=float)
         next_retained = np.asarray(next_retained_deviations, dtype=float)
         n_nodes = current.shape[-1]
-        width = self.feature_width
-        result = np.zeros((current.shape[0], n_nodes - retained_modes), dtype=float)
-        for output_index, target in enumerate(range(retained_modes, n_nodes)):
-            features = np.zeros((current.shape[0], 3 * width), dtype=float)
-            for offset in range(-self.bandwidth, self.bandwidth + 1):
-                source = target + offset
-                position = offset + self.bandwidth
-                if retained_modes <= source < n_nodes:
-                    features[:, position] = current[:, source]
-                if 0 <= source < retained_modes:
-                    features[:, width + position] = current[:, source]
-                    features[:, 2 * width + position] = next_retained[:, source]
-            frequency_bin = self.frequency_bin(target, n_nodes)
-            result[:, output_index] = (
-                features @ self.transition_coefficients[frequency_bin]
-            )
-        return result
+        targets = np.arange(retained_modes, n_nodes)[:, None]
+        sources = targets + np.arange(-self.bandwidth, self.bandwidth + 1)[None, :]
+        clipped_full = np.clip(sources, 0, n_nodes - 1)
+        unresolved_valid = (sources >= retained_modes) & (sources < n_nodes)
+        retained_valid = (sources >= 0) & (sources < retained_modes)
+        clipped_retained = np.clip(sources, 0, retained_modes - 1)
+        features = np.concatenate(
+            (
+                current[:, clipped_full] * unresolved_valid[None, :, :],
+                current[:, clipped_full] * retained_valid[None, :, :],
+                next_retained[:, clipped_retained] * retained_valid[None, :, :],
+            ),
+            axis=2,
+        )
+        frequency_bins = np.minimum(
+            self.n_frequency_bins - 1,
+            (targets[:, 0] * self.n_frequency_bins) // max(n_nodes - 1, 1),
+        )
+        coefficients = self.transition_coefficients[frequency_bins]
+        return np.sum(features * coefficients[None, :, :], axis=2)
 
 
 class FittedLocalPersistentCompleter:

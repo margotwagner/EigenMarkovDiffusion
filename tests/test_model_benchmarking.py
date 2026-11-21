@@ -148,8 +148,24 @@ def test_fitted_closure_study_cli_is_registered() -> None:
             "20",
             "--frequency-bins",
             "4",
+            "--anchor-conditioned",
+            "--physics-conditioned",
+            "--innovation-rank",
+            "6",
+            "--persistent-innovations",
+            "--run-ablation",
         ]
     )
     assert args.command == "study-fitted-closure"
     assert args.training_runs == 20
     assert args.frequency_bins == 4
+    assert args.anchor_conditioned
+    assert args.physics_conditioned
+    assert args.innovation_rank == 6
+    assert args.persistent_innovations
+    assert args.run_ablation
+    assert args.ablation_ranks == [4, 8, 12, 20]
+    assert args.exact_anchor_runs == 100
+    assert args.conditioning_degrees == [1, 2]
+    assert args.conditioning_folds == 3
+    assert args.recommended_anchor_count == 4

@@ -27,6 +27,7 @@ from typing import Callable, Literal
 
 import numpy as np
 
+from .anchored_closure import AnchoredFittedClosureModel, AnchoredFittedLocalCompleter
 from .baselines import (
     multinomial_random_walk_diffusion,
     naive_random_walk_diffusion,
@@ -37,6 +38,10 @@ from .completion import (
     UnresolvedGaussianCompleter,
 )
 from .config import DiffusionConfig
+from .conditioned_closure import (
+    PhysicsConditionedClosureModel,
+    PhysicsConditionedLocalCompleter,
+)
 from .correlated_modal import (
     CorrelatedModalDiffusion,
     HandoffCorrelatedModalDiffusion,
@@ -801,6 +806,8 @@ def _measure_operating_point(
     closure: str = DEFAULT_COMPLETION_CLOSURE,
     modal_bandwidth: int = DEFAULT_LOCAL_MODAL_BANDWIDTH,
     fitted_model: FittedLocalClosureModel | None = None,
+    anchored_model: AnchoredFittedClosureModel | None = None,
+    conditioned_model: PhysicsConditionedClosureModel | None = None,
 ) -> OperatingPointBenchmark:
     """Measure one completed and simplex-constrained pipeline in this process."""
 
@@ -859,9 +866,28 @@ def _measure_operating_point(
             retained_modes=final_modes,
             completion_start_time=simulator.handoff_time,
         )
+    elif closure == "anchored_fitted":
+        if anchored_model is None:
+            raise ValueError("anchored_fitted closure requires anchored_model")
+        completer = AnchoredFittedLocalCompleter(
+            config,
+            anchored_model,
+            retained_modes=final_modes,
+            completion_start_time=simulator.handoff_time,
+        )
+    elif closure == "conditioned_fitted":
+        if conditioned_model is None:
+            raise ValueError("conditioned_fitted closure requires conditioned_model")
+        completer = PhysicsConditionedLocalCompleter(
+            config,
+            conditioned_model,
+            retained_modes=final_modes,
+            completion_start_time=simulator.handoff_time,
+        )
     else:
         raise ValueError(
-            "closure must be dense_persistent, local_persistent, or fitted_local"
+            "closure must be dense_persistent, local_persistent, fitted_local, "
+            "anchored_fitted, or conditioned_fitted"
         )
     setup_seconds = perf_counter() - setup_start
     setup_objects = (simulator, completer)
@@ -909,7 +935,13 @@ def _measure_operating_point(
         closure=closure,
         modal_bandwidth=(
             modal_bandwidth
-            if closure in {"local_persistent", "fitted_local"}
+            if closure
+            in {
+                "local_persistent",
+                "fitted_local",
+                "anchored_fitted",
+                "conditioned_fitted",
+            }
             else 0
         ),
         n_particles=config.n_particles,
@@ -942,6 +974,8 @@ def _operating_point_worker(
     closure: str,
     modal_bandwidth: int,
     fitted_model: FittedLocalClosureModel | None,
+    anchored_model: AnchoredFittedClosureModel | None,
+    conditioned_model: PhysicsConditionedClosureModel | None,
 ) -> None:
     """Spawn-process entry point used to isolate peak RSS measurements."""
 
@@ -959,6 +993,8 @@ def _operating_point_worker(
                     closure=closure,
                     modal_bandwidth=modal_bandwidth,
                     fitted_model=fitted_model,
+                    anchored_model=anchored_model,
+                    conditioned_model=conditioned_model,
                 ),
             )
         )
@@ -985,6 +1021,8 @@ def benchmark_operating_points(
     closure: str = DEFAULT_COMPLETION_CLOSURE,
     modal_bandwidth: int = DEFAULT_LOCAL_MODAL_BANDWIDTH,
     fitted_model: FittedLocalClosureModel | None = None,
+    anchored_model: AnchoredFittedClosureModel | None = None,
+    conditioned_model: PhysicsConditionedClosureModel | None = None,
 ) -> list[OperatingPointBenchmark]:
     """Benchmark selected pipelines across spatial sizes.
 
@@ -1022,6 +1060,8 @@ def benchmark_operating_points(
                     closure=closure,
                     modal_bandwidth=modal_bandwidth,
                     fitted_model=fitted_model,
+                    anchored_model=anchored_model,
+                    conditioned_model=conditioned_model,
                 )
             else:
                 context = mp.get_context("spawn")
@@ -1039,6 +1079,8 @@ def benchmark_operating_points(
                         closure,
                         modal_bandwidth,
                         fitted_model,
+                        anchored_model,
+                        conditioned_model,
                     ),
                 )
                 process.start()

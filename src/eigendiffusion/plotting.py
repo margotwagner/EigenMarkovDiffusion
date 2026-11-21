@@ -1035,6 +1035,8 @@ def plot_fitted_closure_study(
     validation_rows: list[dict[str, float | int | str | None]],
     benchmark_records,
     output_path: str | Path,
+    *,
+    candidate_model: str = "fitted_local",
 ) -> Path:
     """Plot fitted-versus-analytic held-out accuracy and scaling."""
 
@@ -1081,7 +1083,7 @@ def plot_fitted_closure_study(
     fitted = {
         str(row["case"]): row
         for row in validation_rows
-        if row["model"] == "fitted_local"
+        if row["model"] == candidate_model
     }
     for ax, metric, title in (
         (
@@ -1102,7 +1104,7 @@ def plot_fitted_closure_study(
         ax.bar(np.arange(len(cases)), ratios)
         ax.axhline(1.0, color="black", linestyle="--", linewidth=1)
         ax.set_xticks(np.arange(len(cases)), cases, rotation=25, ha="right")
-        ax.set_ylabel("fitted / analytic")
+        ax.set_ylabel(f"{candidate_model} / analytic")
         ax.set_title(title)
 
     for ax, field, title, ylabel in (
@@ -1131,7 +1133,7 @@ def plot_fitted_closure_study(
         ax.set_yscale("log")
         ax.grid(alpha=0.2)
     axes[1, 0].legend(fontsize=8)
-    fig.suptitle("Fitted sparse closure: unseen accuracy and scaling", y=1.01)
+    fig.suptitle(f"{candidate_model}: unseen accuracy and scaling", y=1.01)
     fig.tight_layout()
     fig.savefig(output, dpi=200, bbox_inches="tight")
     plt.close(fig)

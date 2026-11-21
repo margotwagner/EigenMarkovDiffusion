@@ -206,7 +206,12 @@ for reference comparisons. See
 
 The first cross-configuration fitted closure was also implemented and tested,
 but it did not pass the declared variance, covariance, temporal, or runtime
-gates. It is retained as an experimental baseline; see
+gates. A 12-anchor, low-rank-innovation successor improved all four measures
+but also missed the frozen promotion gates. Exact-anchor rank and persistence
+ablations identify regression transfer—not innovation rank—as the remaining
+scientific bottleneck. A jointly physics-conditioned regression improves lag
+error modestly but also fails the frozen gates; cross-validation now supplies
+a targeted bridge-anchor design. These models remain experimental; see
 [fitted closure study](docs/FITTED_CLOSURE_STUDY.md).
 
 ## Repository layout

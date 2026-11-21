@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .anchored_closure import AnchoredFittedClosureModel, complete_anchored_ensemble
 from .benchmarking import (
     SELECTED_OPERATING_POINTS,
     benchmark_operating_points,
@@ -17,11 +18,22 @@ from .benchmarking import (
     write_benchmark_csv,
     write_operating_point_benchmark_csv,
 )
+from .conditioned_closure import (
+    PhysicsConditionedClosureModel,
+    PhysicsConditionedRegressionModel,
+    complete_conditioned_ensemble,
+    cross_validate_conditioned_regression,
+    recommend_anchor_expansion,
+)
 from .distribution_metrics import summarize_distribution_ensemble
 from .ensemble import (
     apply_readout_ensemble,
     run_modal_ensemble,
     run_random_walk_ensemble,
+)
+from .fitted_ablation import (
+    run_anchor_innovation_ablation,
+    run_exact_anchor_ensemble_validation,
 )
 from .fitted_closure import (
     FittedClosureTrainingCase,
@@ -70,6 +82,11 @@ def _nearest_indices(times: np.ndarray, requested: list[float]) -> list[int]:
 def run_fitted_closure_study(args) -> int:
     """Train once, freeze the model, and evaluate unseen physical cases."""
 
+    physics_conditioned = bool(getattr(args, "physics_conditioned", False))
+    anchored = bool(getattr(args, "anchor_conditioned", False)) or physics_conditioned
+    persistent_innovations = bool(getattr(args, "persistent_innovations", False))
+    if persistent_innovations and not anchored:
+        raise ValueError("persistent innovations require --anchor-conditioned")
     output_directory = Path(args.output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
     point = SELECTED_OPERATING_POINTS[2]
@@ -88,14 +105,31 @@ def run_fitted_closure_study(args) -> int:
         )
 
     training_specs = (
-        (51, 2_000, 0.20, 1.1e-4, 3.0),
-        (51, 9_000, 0.72, 4.4e-4, 5.0),
-        (101, 3_000, 0.18, 2.2e-4, 4.5),
-        (101, 8_000, 0.48, 1.1e-4, 5.0),
-        (101, 5_275, 0.82, 4.4e-4, 3.0),
-        (151, 2_500, 0.30, 2.2e-4, 4.0),
-        (151, 8_500, 0.67, 3.3e-4, 5.5),
-        (201, 5_000, 0.55, 1.65e-4, 4.5),
+        (
+            (51, 2_500, 0.35, 1.5e-4, 3.5),
+            (51, 8_000, 0.72, 3.5e-4, 5.5),
+            (81, 4_000, 0.50, 1.8e-4, 3.8),
+            (81, 6_500, 0.68, 2.7e-4, 4.5),
+            (101, 3_000, 0.25, 2.0e-4, 4.0),
+            (101, 4_500, 0.45, 2.0e-4, 4.2),
+            (101, 6_000, 0.65, 2.4e-4, 3.8),
+            (101, 8_000, 0.78, 3.4e-4, 5.0),
+            (126, 4_000, 0.48, 1.8e-4, 4.5),
+            (126, 7_000, 0.70, 2.7e-4, 5.5),
+            (151, 5_000, 0.55, 2.2e-4, 4.0),
+            (201, 5_500, 0.60, 2.2e-4, 4.0),
+        )
+        if anchored
+        else (
+            (51, 2_000, 0.20, 1.1e-4, 3.0),
+            (51, 9_000, 0.72, 4.4e-4, 5.0),
+            (101, 3_000, 0.18, 2.2e-4, 4.5),
+            (101, 8_000, 0.48, 1.1e-4, 5.0),
+            (101, 5_275, 0.82, 4.4e-4, 3.0),
+            (151, 2_500, 0.30, 2.2e-4, 4.0),
+            (151, 8_500, 0.67, 3.3e-4, 5.5),
+            (201, 5_000, 0.55, 1.65e-4, 4.5),
+        )
     )
     training_cases: list[FittedClosureTrainingCase] = []
     training_manifest: list[dict[str, object]] = []
@@ -134,18 +168,113 @@ def run_fitted_closure_study(args) -> int:
         )
     _write_rows(training_manifest, output_directory / "training_manifest.csv")
 
-    model = FittedLocalClosureModel.fit(
-        training_cases,
-        bandwidth=args.bandwidth,
-        n_frequency_bins=args.frequency_bins,
-        n_time_bins=args.time_bins,
-        residual_grid_size=args.residual_grid_size,
-        ridge=args.fit_ridge,
-        max_residual_samples=args.max_residual_samples,
-        max_regression_samples_per_target=args.regression_samples_per_target,
-        seed=args.seed,
-    )
-    model_path = model.save(output_directory / "fitted_local_closure.npz")
+    fit_kwargs = {
+        "bandwidth": args.bandwidth,
+        "n_frequency_bins": args.frequency_bins,
+        "n_time_bins": args.time_bins,
+        "residual_grid_size": args.residual_grid_size,
+        "ridge": args.fit_ridge,
+        "max_residual_samples": args.max_residual_samples,
+        "max_regression_samples_per_target": args.regression_samples_per_target,
+        "seed": args.seed,
+    }
+    ablation_path: Path | None = None
+    if anchored and args.run_ablation:
+        ablation_path = run_anchor_innovation_ablation(
+            training_cases,
+            output_directory / "anchor_innovation_ablation.csv",
+            ranks=args.ablation_ranks,
+            bandwidth=args.bandwidth,
+            n_frequency_bins=args.frequency_bins,
+            n_time_bins=args.time_bins,
+            residual_grid_size=args.residual_grid_size,
+            nearest_anchors=args.nearest_anchors,
+            ridge=args.fit_ridge,
+            max_residual_samples=args.max_residual_samples,
+            max_regression_samples_per_target=args.regression_samples_per_target,
+            seed=args.seed,
+        )
+    conditioning_cv_path: Path | None = None
+    anchor_recommendations_path: Path | None = None
+    selected_conditioning_degree = args.conditioning_degree
+    if physics_conditioned and args.run_conditioning_cv:
+        conditioning_cv_path, selected_conditioning_degree = (
+            cross_validate_conditioned_regression(
+                training_cases,
+                output_directory / "conditioning_cross_validation.csv",
+                degrees=args.conditioning_degrees,
+                folds=args.conditioning_folds,
+                bandwidth=args.bandwidth,
+                n_frequency_bins=args.frequency_bins,
+                ridge=args.conditioning_ridge,
+                max_regression_samples_per_target=(
+                    args.regression_samples_per_target
+                ),
+                seed=args.seed,
+            )
+        )
+        anchor_recommendations_path = recommend_anchor_expansion(
+            training_cases,
+            conditioning_cv_path,
+            output_directory / "recommended_anchor_expansion.csv",
+            count=args.recommended_anchor_count,
+        )
+    if physics_conditioned:
+        innovations = AnchoredFittedClosureModel.fit(
+            training_cases,
+            innovation_rank=args.innovation_rank,
+            nearest_anchors=args.nearest_anchors,
+            persistent_innovations=persistent_innovations,
+            **fit_kwargs,
+        )
+        regression = PhysicsConditionedRegressionModel.fit(
+            training_cases,
+            bandwidth=args.bandwidth,
+            n_frequency_bins=args.frequency_bins,
+            degree=selected_conditioning_degree,
+            ridge=args.conditioning_ridge,
+            max_regression_samples_per_target=args.regression_samples_per_target,
+            seed=args.seed,
+        )
+        model = PhysicsConditionedClosureModel(regression, innovations)
+        model_path = model.save(output_directory / "physics_conditioned_closure.npz")
+        candidate_model = "physics_conditioned_fitted"
+        candidate_closure = "conditioned_fitted"
+    elif anchored:
+        model = AnchoredFittedClosureModel.fit(
+            training_cases,
+            innovation_rank=args.innovation_rank,
+            nearest_anchors=args.nearest_anchors,
+            persistent_innovations=persistent_innovations,
+            **fit_kwargs,
+        )
+        artifact_name = (
+            "anchored_persistent_fitted_closure.npz"
+            if persistent_innovations
+            else "anchored_fitted_closure.npz"
+        )
+        model_path = model.save(output_directory / artifact_name)
+        candidate_model = (
+            "anchored_persistent_fitted"
+            if persistent_innovations
+            else "anchored_fitted"
+        )
+        candidate_closure = "anchored_fitted"
+    else:
+        model = FittedLocalClosureModel.fit(training_cases, **fit_kwargs)
+        model_path = model.save(output_directory / "fitted_local_closure.npz")
+        candidate_model = "fitted_local"
+        candidate_closure = "fitted_local"
+    exact_anchor_path: Path | None = None
+    if anchored and not physics_conditioned and args.run_ablation:
+        exact_anchor_path = run_exact_anchor_ensemble_validation(
+            training_cases,
+            model,
+            output_directory / "exact_anchor_validation.csv",
+            n_runs=args.exact_anchor_runs,
+            bandwidth=args.bandwidth,
+            seed=args.seed + 70_000,
+        )
     del training_cases
     gc.collect()
 
@@ -278,18 +407,39 @@ def run_fitted_closure_study(args) -> int:
             completion_bandwidth=args.bandwidth,
             seed=args.seed + 40_000 + case_index,
         )
-        fitted = complete_fitted_ensemble(
-            raw.runs,
-            config,
-            model,
-            retained_modes=modes,
-            completion_start_time=handoff_time,
-            seed=args.seed + 40_000 + case_index,
-            apply_simplex_bank=True,
-        )
+        if physics_conditioned:
+            fitted = complete_conditioned_ensemble(
+                raw.runs,
+                config,
+                model,
+                retained_modes=modes,
+                completion_start_time=handoff_time,
+                seed=args.seed + 40_000 + case_index,
+                apply_simplex_bank=True,
+            )
+        elif anchored:
+            fitted = complete_anchored_ensemble(
+                raw.runs,
+                config,
+                model,
+                retained_modes=modes,
+                completion_start_time=handoff_time,
+                seed=args.seed + 40_000 + case_index,
+                apply_simplex_bank=True,
+            )
+        else:
+            fitted = complete_fitted_ensemble(
+                raw.runs,
+                config,
+                model,
+                retained_modes=modes,
+                completion_start_time=handoff_time,
+                seed=args.seed + 40_000 + case_index,
+                apply_simplex_bank=True,
+            )
         for model_name, runs in (
             ("analytic_local", analytic.runs),
-            ("fitted_local", fitted),
+            (candidate_model, fitted),
         ):
             metrics = evaluate(
                 config,
@@ -341,7 +491,7 @@ def run_fitted_closure_study(args) -> int:
         fitted = next(
             row
             for row in validation_rows
-            if row["case"] == case_name and row["model"] == "fitted_local"
+            if row["case"] == case_name and row["model"] == candidate_model
         )
         for metric in acceptance_metrics:
             threshold = float(analytic[metric]) + float(floor_metrics[metric])
@@ -371,7 +521,7 @@ def run_fitted_closure_study(args) -> int:
         closure="local_persistent",
         modal_bandwidth=args.bandwidth,
     )
-    fitted_benchmark = benchmark_operating_points(
+    candidate_benchmark = benchmark_operating_points(
         node_counts=args.node_counts,
         n_particles=args.particles,
         total_time=args.total_time,
@@ -383,18 +533,20 @@ def run_fitted_closure_study(args) -> int:
         repeats=args.repeats,
         amortization_runs=args.amortization_runs,
         seed=args.seed,
-        closure="fitted_local",
+        closure=candidate_closure,
         modal_bandwidth=args.bandwidth,
-        fitted_model=model,
+        fitted_model=None if anchored else model,
+        anchored_model=model if anchored and not physics_conditioned else None,
+        conditioned_model=model if physics_conditioned else None,
     )
-    benchmark_records = [*analytic_benchmark, *fitted_benchmark]
+    benchmark_records = [*analytic_benchmark, *candidate_benchmark]
     scaling_csv = write_operating_point_benchmark_csv(
         benchmark_records,
         output_directory / "scaling.csv",
     )
     largest = max(args.node_counts)
     analytic_largest = next(row for row in analytic_benchmark if row.n_nodes == largest)
-    fitted_largest = next(row for row in fitted_benchmark if row.n_nodes == largest)
+    fitted_largest = next(row for row in candidate_benchmark if row.n_nodes == largest)
     scaling_pass = (
         fitted_largest.setup_seconds < analytic_largest.setup_seconds
         and fitted_largest.peak_rss_bytes <= analytic_largest.peak_rss_bytes
@@ -420,10 +572,12 @@ def run_fitted_closure_study(args) -> int:
         validation_rows,
         benchmark_records,
         output_directory / "fitted_closure.png",
+        candidate_model=candidate_model,
     )
     accepted = accuracy_pass and scaling_pass
     summary = {
         "training_cases": len(training_specs),
+        "model_kind": candidate_model,
         "training_runs_per_case": args.training_runs,
         "validation_runs": args.validation_runs,
         "heldout_runs": args.heldout_runs,
@@ -431,10 +585,25 @@ def run_fitted_closure_study(args) -> int:
         "scaling_pass": scaling_pass,
         "accepted_as_default": accepted,
         "production_default": (
-            "fitted_local" if accepted else "analytic_local_bandwidth_12"
+            candidate_model if accepted else "analytic_local_bandwidth_12"
         ),
         "failures": failures,
         "model": str(model_path),
+        "conditioning_degree": (
+            selected_conditioning_degree if physics_conditioned else None
+        ),
+        "conditioning_cross_validation_csv": (
+            str(conditioning_cv_path) if conditioning_cv_path is not None else None
+        ),
+        "recommended_anchor_expansion_csv": (
+            str(anchor_recommendations_path)
+            if anchor_recommendations_path is not None
+            else None
+        ),
+        "ablation_csv": str(ablation_path) if ablation_path is not None else None,
+        "exact_anchor_validation_csv": (
+            str(exact_anchor_path) if exact_anchor_path is not None else None
+        ),
         "validation_csv": str(validation_csv),
         "scaling_csv": str(scaling_csv),
         "figure": str(figure),

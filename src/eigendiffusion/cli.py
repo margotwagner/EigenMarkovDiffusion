@@ -3167,6 +3167,54 @@ def build_parser() -> argparse.ArgumentParser:
     fitted.add_argument("--frequency-bins", type=int, default=8)
     fitted.add_argument("--time-bins", type=int, default=5)
     fitted.add_argument("--residual-grid-size", type=int, default=32)
+    fitted.add_argument(
+        "--anchor-conditioned",
+        action="store_true",
+        help=(
+            "fit separate physical anchors, interpolate nearby models, and use "
+            "low-rank Gaussian innovations"
+        ),
+    )
+    fitted.add_argument(
+        "--physics-conditioned",
+        action="store_true",
+        help="fit one shared regression conditioned on dimensionless physics",
+    )
+    fitted.add_argument("--conditioning-degree", type=int, choices=[1, 2], default=1)
+    fitted.add_argument("--conditioning-ridge", type=float, default=1.0e-2)
+    fitted.add_argument(
+        "--run-conditioning-cv",
+        action="store_true",
+        help="select conditioning complexity with configuration-level folds",
+    )
+    fitted.add_argument(
+        "--conditioning-degrees",
+        type=int,
+        nargs="+",
+        choices=[1, 2],
+        default=[1, 2],
+    )
+    fitted.add_argument("--conditioning-folds", type=int, default=3)
+    fitted.add_argument("--recommended-anchor-count", type=int, default=4)
+    fitted.add_argument("--innovation-rank", type=int, default=12)
+    fitted.add_argument("--nearest-anchors", type=int, default=3)
+    fitted.add_argument(
+        "--persistent-innovations",
+        action="store_true",
+        help="fit a stable conditional Gaussian transition for ordered residuals",
+    )
+    fitted.add_argument(
+        "--run-ablation",
+        action="store_true",
+        help="measure exact-anchor rank, persistence, and interpolation errors",
+    )
+    fitted.add_argument(
+        "--ablation-ranks",
+        type=int,
+        nargs="+",
+        default=[4, 8, 12, 20],
+    )
+    fitted.add_argument("--exact-anchor-runs", type=int, default=100)
     fitted.add_argument("--fit-ridge", type=float, default=1.0e-3)
     fitted.add_argument("--max-residual-samples", type=int, default=4_000)
     fitted.add_argument("--regression-samples-per-target", type=int, default=2_000)
