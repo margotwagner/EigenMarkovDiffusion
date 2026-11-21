@@ -28,6 +28,8 @@ dynamics:
 - `delta_sigma_neighbor`
 - `unresolved_gaussian_completion`
 - `persistent_unresolved_completion`
+- `local_persistent_unresolved_completion`
+- `local_persistent_unresolved_completion_simplex_bank`
 
 See [Modal models](docs/MODAL_MODELS.md) and
 [Mathematical details](docs/MATH.md) for definitions and assumptions.
@@ -121,6 +123,7 @@ The available workflows are:
 | `compare-temporal-correlation` | Compare empirical and exact cross-time covariance |
 | `benchmark-models` | Benchmark full, reduced, and completed model pipelines |
 | `study-operating-points` | Benchmark selected completed pipelines, peak RSS, and distribution error |
+| `study-structured-closure` | Select, validate, and scale the local persistent closure |
 | `benchmark-random-walk` | Compare particle and aggregated random-walk baselines |
 
 For example, compare the main modal formulations:
@@ -194,6 +197,11 @@ python -m eigendiffusion study-operating-points \
 It measures setup and trajectory time, retained arrays, isolated process peak
 RSS, selected-node Jensen--Shannon and Wasserstein distances, and sliced
 Wasserstein distance for full spatial vectors.
+
+Selected completed-pipeline workflows now use the validated bandwidth-12 local
+persistent closure by default. The dense persistent readout remains available
+for reference comparisons. See
+[structured local closure](docs/STRUCTURED_LOCAL_CLOSURE.md).
 
 ## Repository layout
 

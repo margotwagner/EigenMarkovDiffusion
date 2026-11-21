@@ -9,7 +9,7 @@ Laplacian eigenbasis instead of by explicitly tracking particles. The project
 has progressed from the original independent-mode formulation to correlated
 modal dynamics, physically constrained banking, adaptive modal reduction, and
 Gaussian readouts for reconstructing unresolved modes. The package, command
-line workflows, analytic references, diagnostics, and 83 tests are complete and
+line workflows, analytic references, diagnostics, and 86 tests are complete and
 passing. A five-part presentation experiment suite was completed in July 2026.
 
 The main scientific conclusion is that mean propagation is no longer the core
@@ -26,12 +26,12 @@ faster than the aggregated multinomial baseline.
 The latest completed study is based on commit `2138289` plus the operating-point
 benchmark changes described here. The canonical presentation outputs are in
 `outputs/presentation/`, and `run_presentation_results.sh` defines that
-pipeline. All 83 automated tests pass.
+pipeline. All 86 automated tests pass.
 
 Time-resolved errors, bootstrap uncertainty, and a 5,000-trial convergence
 study, predictive handoff/rank rule, completion-rank study, exact pipeline
 benchmark, and distribution-level comparison are now complete. The next phase
-should replace the dense analytic completion oracle with a scalable closure.
+has replaced the dense gain with a validated bandwidth-12 structured closure.
 
 ## Completed work
 
@@ -51,6 +51,8 @@ should replace the dense analytic completion oracle with a scalable closure.
   bootstrap uncertainty intervals, and a nested trial-count convergence CLI.
 - Added isolated peak-RSS scaling and marginal/sliced distribution metrics for
   the three selected completed pipelines.
+- Added a row-sparse local persistent closure, profiling, held-out validation,
+  and isolated scaling; bandwidth 12 is now the selected-pipeline default.
 - Generated five presentation figures with CSV data and supporting NPZ arrays.
 
 ## Experiments completed
@@ -71,6 +73,7 @@ wall-clock measurement and is not an ensemble trial.
 | 7. Predictive handoff selection | Analytic modal-energy predictor validated against correlated handoff ensembles | 35, 50, 60, 75 retained modes; handoff steps 10, 15, 20, 30; 16 held-out configurations; 250 trials each | Predict post-handoff mean, variance, and covariance loss before running an ensemble and identify the accuracy/work Pareto frontier. |
 | 8. Completion and physical-output selection | Independent/persistent completion, with and without simplex banking | Completion-rank sweeps plus 500-trial headline checks at 35/50/75 modes | Select completion rank for compute/balanced/accuracy operating points and test whether nonnegativity and mass conservation distort stochastic moments. |
 | 9. Selected-pipeline scaling and distribution comparison | Persistent completion plus simplex banking at compute-first, balanced, and accuracy-first operating points | Node sweep 51/101/151/201; 3 isolated timing repeats per point; 500 trials per point at 101 nodes; 64 sliced projections; seed 5 | Measure full-pipeline runtime, setup, retained arrays, peak RSS, marginal Jensen--Shannon/Wasserstein distance, and full-vector sliced Wasserstein distance; select a default using accuracy and measured cost. |
+| 10. Structured-closure selection | Dense persistent closure versus local modal bandwidths 4/8/12/20 at the accuracy-first operating point | 500 base trials; five held-out cases with 250 trials each; node scaling 51/101/151/201; 3 timing repeats; seed 6 | Replace dense time-indexed gains, test out-of-sample robustness, and require lower setup/storage/peak RSS without distribution error beyond the sampling-floor allowance. |
 
 The original presentation suite did not include the completion-rank and
 selected-pipeline studies; both have now been completed separately.
@@ -151,23 +154,30 @@ is temporary dense linear-algebra workspace and the time-indexed analytic
 completion construction, so modal rank reduction alone will not deliver a
 scalable implementation.
 
+The structured follow-up resolves most of that implementation bottleneck.
+Bandwidth 12 produced normalized sliced Wasserstein error 0.0802 versus 0.0807
+for dense completion on 500 trials and passed all five held-out distribution
+checks. At 201 nodes it reduced retained arrays from 27.72 to 9.99 MiB, sampled
+peak RSS from 433.01 to 85.75 MiB, and setup time from 1.195 to 1.117 seconds.
+It is therefore the selected-pipeline default. The dense closure is retained
+as a reproducible scientific reference.
+
 ## Ordered next steps
 
-### 1. Replace the analytic oracle closure
+### 1. Remove the remaining analytic-moment dependency
 
-Develop a structured, sparse, local, or learned unresolved process that retains
-the persistent model's temporal accuracy without dense time-indexed conditional
-gains. Train/fit on one set of particle simulations and validate on held-out
-initial conditions, particle counts, domains, and diffusivities.
+Fit the validated sparse bandwidth-12 coefficients from training trajectories
+instead of exact multinomial moments. Preserve the row-sparse storage and
+vectorized execution path.
 
-### 2. Validate the replacement out of sample
+### 2. Repeat the held-out suite for fitted coefficients
 
 Fit on one training set, then validate on held-out impulse locations, particle
 counts, domain sizes, diffusivities, and grid resolutions. Require the new
 closure to remain within the multinomial sampling floor for moment and
 distribution metrics.
 
-### 3. Repeat scaling against both baselines
+### 3. Benchmark against both random-walk baselines
 
 Remove full-grid noise construction from the reduced path and reduce completion
 setup/storage. Then repeat timing and peak-RSS measurements at larger grids and
@@ -420,3 +430,28 @@ one independently measured multinomial-versus-multinomial sampling-floor score
 of the best pipeline. The eligible point with the smallest 100-run-amortized
 runtime is selected. Under the 500-trial study, all three points were eligible
 and accuracy-first was fastest.
+
+# Appendix E: structured local persistent closure
+
+Let `k` denote an unresolved modal index and let `J_k` contain conditioning
+coordinates whose global modal index differs from `k` by at most bandwidth
+`b`. The local gain row is
+
+```text
+K[k,J_k] = Cov(u_(t+1), y[J_k])
+           (Cov(y[J_k], y[J_k]) + ridge)^(-1),
+K[k,j]   = 0 for j not in J_k.
+```
+
+The local row systems are padded and solved in one batch per transition, then
+stored as index/value arrays. Sparse gain application is therefore
+
+```text
+(K y)[k] = sum_(j in J_k) K[k,j] y[j],
+```
+
+rather than multiplication by a dense time-indexed matrix. The innovation
+covariance remains `C_uu - K C_yu` and is sampled through the same configurable
+low-rank factor. With `b` spanning every modal index, this construction is
+numerically equivalent to the dense persistent closure. Experiment 10 selected
+`b = 12` under the declared sampling-floor accuracy and scaling gates.

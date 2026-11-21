@@ -15,7 +15,7 @@ set -euo pipefail
 
 mkdir -p outputs/presentation
 
-echo "1/9 Comparing the core modal models..."
+echo "1/10 Comparing the core modal models..."
 python -m eigendiffusion compare-modal-models \
   --models independent_modal correlated_modal banked_correlated_modal \
   --particles 5275 \
@@ -32,7 +32,7 @@ python -m eigendiffusion compare-modal-models \
   --csv-output outputs/presentation/01_modal_models.csv \
   --data-output outputs/presentation/01_modal_models.npz
 
-echo "2/9 Comparing reduced-model readouts and completion..."
+echo "2/10 Comparing reduced-model readouts and completion..."
 python -m eigendiffusion compare-readouts \
   --modal-model handoff_correlated_modal \
   --initial-modes 101 \
@@ -54,7 +54,7 @@ python -m eigendiffusion compare-readouts \
   --csv-output outputs/presentation/02_readouts.csv \
   --data-output outputs/presentation/02_readouts.npz
 
-echo "3/9 Sweeping handoff time and reduced mode count..."
+echo "3/10 Sweeping handoff time and reduced mode count..."
 python -m eigendiffusion sweep-handoff \
   --initial-modes 101 \
   --final-modes 20 35 50 75 \
@@ -70,7 +70,7 @@ python -m eigendiffusion sweep-handoff \
   --output outputs/presentation/03_handoff_sweep.png \
   --csv-output outputs/presentation/03_handoff_sweep.csv
 
-echo "4/9 Comparing temporal correlations..."
+echo "4/10 Comparing temporal correlations..."
 python -m eigendiffusion compare-temporal-correlation \
   --initial-modes 101 \
   --handoff-time 10 \
@@ -93,7 +93,7 @@ python -m eigendiffusion compare-temporal-correlation \
   --csv-output outputs/presentation/04_temporal_correlation.csv \
   --data-output outputs/presentation/04_temporal_correlation.npz
 
-echo "5/9 Benchmarking model performance..."
+echo "5/10 Benchmarking model performance..."
 python -m eigendiffusion benchmark-models \
   --methods multinomial_random_walk full_correlated_modal handoff_raw handoff_independent_completion handoff_persistent_completion \
   --node-counts 31 51 101 151 \
@@ -109,7 +109,7 @@ python -m eigendiffusion benchmark-models \
   --output outputs/presentation/05_performance.png \
   --csv-output outputs/presentation/05_performance.csv
 
-echo "6/9 Measuring trial-count convergence..."
+echo "6/10 Measuring trial-count convergence..."
 python -m eigendiffusion study-trial-convergence \
   --models independent_modal correlated_modal banked_correlated_modal \
   --particles 5275 \
@@ -127,7 +127,7 @@ python -m eigendiffusion study-trial-convergence \
   --csv-output outputs/presentation/06_trial_convergence.csv \
   --data-output outputs/presentation/06_trial_convergence.npz
 
-echo "7/9 Validating predictive handoff selection..."
+echo "7/10 Validating predictive handoff selection..."
 python -m eigendiffusion study-handoff-selection \
   --particles 5275 \
   --nodes 101 \
@@ -145,7 +145,7 @@ python -m eigendiffusion study-handoff-selection \
   --output outputs/presentation/07_handoff_selection.png \
   --csv-output outputs/presentation/07_handoff_selection.csv
 
-echo "8/9 Sweeping completion rank and physical constraints..."
+echo "8/10 Sweeping completion rank and physical constraints..."
 python -m eigendiffusion sweep-completion-rank \
   --particles 5275 \
   --nodes 101 \
@@ -165,7 +165,7 @@ python -m eigendiffusion sweep-completion-rank \
   --output outputs/presentation/08_completion_selection.png \
   --csv-output outputs/presentation/08_completion_selection.csv
 
-echo "9/9 Benchmarking selected pipelines and distribution accuracy..."
+echo "9/10 Benchmarking selected pipelines and distribution accuracy..."
 python -m eigendiffusion study-operating-points \
   --node-counts 51 101 151 201 \
   --accuracy-nodes 101 \
@@ -184,5 +184,21 @@ python -m eigendiffusion study-operating-points \
   --csv-output outputs/presentation/09_operating_point_scaling.csv \
   --distribution-csv-output outputs/presentation/09_distribution_accuracy.csv \
   --summary-output outputs/presentation/09_operating_point_summary.json
+
+echo "10/10 Selecting and validating the structured local closure..."
+python -m eigendiffusion study-structured-closure \
+  --node-counts 51 101 151 201 \
+  --accuracy-nodes 101 \
+  --particles 5275 \
+  --accuracy-runs 500 \
+  --heldout-runs 250 \
+  --bandwidths 4 8 12 20 \
+  --repeats 3 \
+  --amortization-runs 100 \
+  --distribution-times 20 50 100 \
+  --distribution-node-offsets -10 0 10 \
+  --projections 64 \
+  --seed 6 \
+  --output-directory outputs/presentation/10_structured_closure
 
 echo "Presentation results are ready in outputs/presentation/."

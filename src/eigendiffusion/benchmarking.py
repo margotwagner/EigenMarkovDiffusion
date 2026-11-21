@@ -32,6 +32,7 @@ from .baselines import (
     naive_random_walk_diffusion,
 )
 from .completion import (
+    LocalPersistentUnresolvedGaussianCompleter,
     PersistentUnresolvedGaussianCompleter,
     UnresolvedGaussianCompleter,
 )
@@ -90,6 +91,8 @@ SELECTED_OPERATING_POINTS: tuple[OperatingPoint, ...] = (
     OperatingPoint("balanced", 50, 10.0, 10),
     OperatingPoint("accuracy_first", 75, 30.0, 5),
 )
+DEFAULT_COMPLETION_CLOSURE = "local_persistent"
+DEFAULT_LOCAL_MODAL_BANDWIDTH = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +100,8 @@ class OperatingPointBenchmark:
     """Isolated runtime and peak-memory result for one operating point."""
 
     operating_point: str
+    closure: str
+    modal_bandwidth: int
     n_particles: int
     n_nodes: int
     n_steps: int
@@ -792,8 +797,31 @@ def _measure_operating_point(
     repeats: int,
     amortization_runs: int,
     seed: int,
+    closure: str = DEFAULT_COMPLETION_CLOSURE,
+    modal_bandwidth: int = DEFAULT_LOCAL_MODAL_BANDWIDTH,
 ) -> OperatingPointBenchmark:
     """Measure one completed and simplex-constrained pipeline in this process."""
+
+    import os
+    import threading
+    import time
+
+    stop_monitor = threading.Event()
+    page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    sampled_rss = [0]
+
+    def monitor_rss() -> None:
+        while not stop_monitor.is_set():
+            try:
+                with open("/proc/self/statm", encoding="utf-8") as handle:
+                    resident_pages = int(handle.read().split()[1])
+                sampled_rss[0] = max(sampled_rss[0], resident_pages * page_size)
+            except (OSError, ValueError, IndexError):
+                sampled_rss[0] = max(sampled_rss[0], _peak_rss_bytes())
+            time.sleep(0.001)
+
+    monitor = threading.Thread(target=monitor_rss, daemon=True)
+    monitor.start()
 
     final_modes, handoff_time, completion_rank = point.scaled(
         config.n_nodes,
@@ -806,13 +834,22 @@ def _measure_operating_point(
         final_n_modes=final_modes,
         handoff_time=handoff_time,
     )
-    completer = PersistentUnresolvedGaussianCompleter(
-        config,
-        retained_modes=final_modes,
-        completion_start_time=simulator.handoff_time,
-        completion_rank=completion_rank,
-        ridge=completion_ridge,
-    )
+    completer_kwargs = {
+        "retained_modes": final_modes,
+        "completion_start_time": simulator.handoff_time,
+        "completion_rank": completion_rank,
+        "ridge": completion_ridge,
+    }
+    if closure == "dense_persistent":
+        completer = PersistentUnresolvedGaussianCompleter(config, **completer_kwargs)
+    elif closure == "local_persistent":
+        completer_kwargs["modal_bandwidth"] = modal_bandwidth
+        completer = LocalPersistentUnresolvedGaussianCompleter(
+            config,
+            **completer_kwargs,
+        )
+    else:
+        raise ValueError("closure must be 'dense_persistent' or 'local_persistent'")
     setup_seconds = perf_counter() - setup_start
     setup_objects = (simulator, completer)
     setup_array_bytes = deep_numpy_nbytes(setup_objects)
@@ -852,8 +889,12 @@ def _measure_operating_point(
 
     values = np.asarray(timings, dtype=float)
     median = float(np.median(values))
+    stop_monitor.set()
+    monitor.join()
     return OperatingPointBenchmark(
         operating_point=point.name,
+        closure=closure,
+        modal_bandwidth=modal_bandwidth if closure == "local_persistent" else 0,
         n_particles=config.n_particles,
         n_nodes=config.n_nodes,
         n_steps=config.n_steps,
@@ -869,7 +910,7 @@ def _measure_operating_point(
         amortized_seconds_per_run=median + setup_seconds / amortization_runs,
         setup_array_bytes=setup_array_bytes,
         resident_array_bytes=resident_array_bytes,
-        peak_rss_bytes=_peak_rss_bytes(),
+        peak_rss_bytes=max(sampled_rss[0], 1),
     )
 
 
@@ -881,6 +922,8 @@ def _operating_point_worker(
     repeats: int,
     amortization_runs: int,
     seed: int,
+    closure: str,
+    modal_bandwidth: int,
 ) -> None:
     """Spawn-process entry point used to isolate peak RSS measurements."""
 
@@ -895,6 +938,8 @@ def _operating_point_worker(
                     repeats=repeats,
                     amortization_runs=amortization_runs,
                     seed=seed,
+                    closure=closure,
+                    modal_bandwidth=modal_bandwidth,
                 ),
             )
         )
@@ -918,6 +963,8 @@ def benchmark_operating_points(
     stability_safety: float = 0.95,
     seed: int = 0,
     isolate_peak_rss: bool = True,
+    closure: str = DEFAULT_COMPLETION_CLOSURE,
+    modal_bandwidth: int = DEFAULT_LOCAL_MODAL_BANDWIDTH,
 ) -> list[OperatingPointBenchmark]:
     """Benchmark selected pipelines across spatial sizes.
 
@@ -952,6 +999,8 @@ def benchmark_operating_points(
                     repeats=repeats,
                     amortization_runs=amortization_runs,
                     seed=point_seed,
+                    closure=closure,
+                    modal_bandwidth=modal_bandwidth,
                 )
             else:
                 context = mp.get_context("spawn")
@@ -966,6 +1015,8 @@ def benchmark_operating_points(
                         repeats,
                         amortization_runs,
                         point_seed,
+                        closure,
+                        modal_bandwidth,
                     ),
                 )
                 process.start()

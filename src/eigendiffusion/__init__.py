@@ -10,6 +10,8 @@ from .baselines import (
 )
 from .benchmarking import (
     BENCHMARK_METHOD_NAMES,
+    DEFAULT_COMPLETION_CLOSURE,
+    DEFAULT_LOCAL_MODAL_BANDWIDTH,
     SELECTED_OPERATING_POINTS,
     BenchmarkMethodName,
     DiffusionMethodBenchmark,
@@ -27,6 +29,7 @@ from .benchmarking import (
 )
 from .completion import (
     CompletionStep,
+    LocalPersistentUnresolvedGaussianCompleter,
     PersistentTransitionStep,
     PersistentUnresolvedGaussianCompleter,
     UnresolvedGaussianCompleter,
@@ -111,6 +114,8 @@ from .temporal import (
 
 __all__ = [
     "BENCHMARK_METHOD_NAMES",
+    "DEFAULT_COMPLETION_CLOSURE",
+    "DEFAULT_LOCAL_MODAL_BANDWIDTH",
     "SELECTED_OPERATING_POINTS",
     "BenchmarkMethodName",
     "BankedCorrelatedModalDiffusion",
@@ -131,6 +136,7 @@ __all__ = [
     "EnsembleDiagnostics",
     "EnsembleResult",
     "IndependentModalDiffusion",
+    "LocalPersistentUnresolvedGaussianCompleter",
     "MODAL_MODEL_NAMES",
     "ModalModelName",
     "OperatingPoint",

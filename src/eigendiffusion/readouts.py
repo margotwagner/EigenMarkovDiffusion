@@ -44,6 +44,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .completion import (
+    LocalPersistentUnresolvedGaussianCompleter,
     PersistentUnresolvedGaussianCompleter,
     UnresolvedGaussianCompleter,
 )
@@ -60,6 +61,8 @@ ReadoutName = Literal[
     "persistent_unresolved_completion",
     "unresolved_gaussian_completion_simplex_bank",
     "persistent_unresolved_completion_simplex_bank",
+    "local_persistent_unresolved_completion",
+    "local_persistent_unresolved_completion_simplex_bank",
 ]
 READOUT_NAMES: tuple[ReadoutName, ...] = (
     "raw",
@@ -70,6 +73,8 @@ READOUT_NAMES: tuple[ReadoutName, ...] = (
     "persistent_unresolved_completion",
     "unresolved_gaussian_completion_simplex_bank",
     "persistent_unresolved_completion_simplex_bank",
+    "local_persistent_unresolved_completion",
+    "local_persistent_unresolved_completion_simplex_bank",
 )
 
 
@@ -375,6 +380,7 @@ def apply_readout(
     completion_start_time: float = 0.0,
     completion_rank: int | None = None,
     completion_ridge: float = 1.0e-2,
+    completion_bandwidth: int = 12,
     rng: np.random.Generator | None = None,
 ) -> ReadoutResult:
     """Apply one named output readout to a modal spatial trajectory."""
@@ -420,6 +426,36 @@ def apply_readout(
             completion_rank=completion_rank,
             completion_ridge=completion_ridge,
             rng=rng,
+        )
+    if readout in {
+        "local_persistent_unresolved_completion",
+        "local_persistent_unresolved_completion_simplex_bank",
+    }:
+        if config is None or retained_modes is None:
+            raise ValueError(f"{readout} requires config and retained_modes")
+        values = _validate_trajectory(raw_counts, total_mass)
+        completer = LocalPersistentUnresolvedGaussianCompleter(
+            config,
+            retained_modes=retained_modes,
+            completion_start_time=completion_start_time,
+            completion_rank=completion_rank,
+            modal_bandwidth=completion_bandwidth,
+            ridge=completion_ridge,
+        )
+        completed, additions = completer.complete(values, rng=rng)
+        if readout.endswith("_simplex_bank"):
+            constrained = simplex_bank_readout(completed, total_mass)
+            return ReadoutResult(
+                counts=constrained.counts,
+                residuals=constrained.residuals,
+                adjusted_inputs=completed,
+                readout_name=readout,
+            )
+        return ReadoutResult(
+            counts=completed,
+            residuals=additions,
+            adjusted_inputs=values.copy(),
+            readout_name=readout,
         )
     if readout in {
         "unresolved_gaussian_completion_simplex_bank",

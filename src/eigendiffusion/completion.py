@@ -62,6 +62,52 @@ class PersistentTransitionStep:
     conditional_factor: FloatArray
 
 
+@dataclass(frozen=True, slots=True)
+class SparseRowGain:
+    """Padded row-sparse matrix used by the local modal closure."""
+
+    indices: NDArray[np.int64]
+    values: FloatArray
+    counts: NDArray[np.int64]
+    n_columns: int
+
+    def matvec(self, vector: FloatArray) -> FloatArray:
+        vector = np.asarray(vector, dtype=float)
+        if vector.shape != (self.n_columns,):
+            raise ValueError("vector has the wrong size for sparse gain")
+        if self.values.shape[1] == 0:
+            return np.zeros(self.values.shape[0], dtype=float)
+        return np.sum(self.values * vector[self.indices], axis=1)
+
+    def to_dense(self) -> FloatArray:
+        dense = np.zeros((self.values.shape[0], self.n_columns), dtype=float)
+        for row, count in enumerate(self.counts):
+            width = int(count)
+            if width:
+                dense[row, self.indices[row, :width]] = self.values[row, :width]
+        return dense
+
+
+@dataclass(frozen=True, slots=True)
+class LocalCompletionStep:
+    """Same-time conditional parameters with a row-sparse modal gain."""
+
+    retained_mean: FloatArray
+    omitted_mean: FloatArray
+    conditional_gain: SparseRowGain
+    conditional_factor: FloatArray
+
+
+@dataclass(frozen=True, slots=True)
+class LocalPersistentTransitionStep:
+    """Persistent transition parameters with local modal conditioning."""
+
+    conditioning_mean: FloatArray
+    target_mean: FloatArray
+    conditional_gain: SparseRowGain
+    conditional_factor: FloatArray
+
+
 class _GaussianCompletionBase:
     """Shared basis construction and stable Gaussian conditioning helpers."""
 
@@ -491,4 +537,281 @@ class PersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
             additions[time_index + 1] = addition
             completed[time_index + 1] = values[time_index + 1] + addition
 
+        return completed, additions
+
+
+class LocalPersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
+    """Persistent completion with band-limited conditioning in modal index.
+
+    For target mode ``k``, only conditioning modes whose global modal index is
+    within ``modal_bandwidth`` of ``k`` are used. All local row systems are
+    padded and solved in one batch per transition, then stored in a row-sparse
+    representation. This replaces the dense time-indexed conditional gains
+    while retaining the same Gaussian persistent-state construction.
+    """
+
+    def __init__(
+        self,
+        config: DiffusionConfig,
+        *,
+        retained_modes: int,
+        completion_start_time: float = 0.0,
+        completion_rank: int | None = None,
+        modal_bandwidth: int = 12,
+        ridge: float = 1.0e-2,
+        eigenvalue_tolerance: float = 1.0e-12,
+    ) -> None:
+        if modal_bandwidth < 0:
+            raise ValueError("modal_bandwidth must be nonnegative")
+        self.modal_bandwidth = int(modal_bandwidth)
+        super().__init__(
+            config,
+            retained_modes=retained_modes,
+            completion_start_time=completion_start_time,
+            completion_rank=completion_rank,
+            ridge=ridge,
+            eigenvalue_tolerance=eigenvalue_tolerance,
+        )
+        self._initial_step, self._transition_steps = self._precompute_local_steps()
+
+    def _solve_sparse_gain(
+        self,
+        target_conditioning_covariance: FloatArray,
+        conditioning_covariance: FloatArray,
+        column_indices: list[NDArray[np.int64]],
+    ) -> SparseRowGain:
+        width = max((indices.size for indices in column_indices), default=0)
+        indices_array = np.zeros((self.omitted_modes, width), dtype=np.int64)
+        values = np.zeros((self.omitted_modes, width), dtype=float)
+        counts = np.zeros(self.omitted_modes, dtype=np.int64)
+        for row, indices in enumerate(column_indices):
+            count = indices.size
+            counts[row] = count
+            if count == 0:
+                continue
+            indices_array[row, :count] = indices
+        if width:
+            active = np.arange(width)[None, :] < counts[:, None]
+            covariance = conditioning_covariance[
+                indices_array[:, :, None],
+                indices_array[:, None, :],
+            ]
+            active_pairs = active[:, :, None] & active[:, None, :]
+            covariance = np.where(active_pairs, covariance, 0.0)
+            cross = target_conditioning_covariance[
+                np.arange(self.omitted_modes)[:, None],
+                indices_array,
+            ]
+            cross = np.where(active, cross, 0.0)
+            active_count = np.maximum(counts, 1)
+            scales = np.trace(covariance, axis1=1, axis2=2) / active_count
+            diagonal = np.arange(width)
+            covariance[:, diagonal, diagonal] += np.where(
+                active,
+                self.ridge * scales[:, None],
+                1.0,
+            )
+            solved = np.linalg.solve(covariance, cross[..., None])[..., 0]
+            values = np.where(active, solved, 0.0)
+        return SparseRowGain(
+            indices=indices_array,
+            values=values,
+            counts=counts,
+            n_columns=conditioning_covariance.shape[0],
+        )
+
+    def _initial_columns(self) -> list[NDArray[np.int64]]:
+        r = self.retained_modes
+        bandwidth = self.modal_bandwidth
+        return [
+            np.flatnonzero(np.abs(np.arange(r) - (r + row)) <= bandwidth).astype(
+                np.int64
+            )
+            for row in range(self.omitted_modes)
+        ]
+
+    def _transition_columns(self) -> list[NDArray[np.int64]]:
+        r = self.retained_modes
+        u = self.omitted_modes
+        bandwidth = self.modal_bandwidth
+        retained_indices = np.arange(r)
+        omitted_indices = r + np.arange(u)
+        rows: list[NDArray[np.int64]] = []
+        for row in range(u):
+            target_mode = r + row
+            previous_u = np.flatnonzero(
+                np.abs(omitted_indices - target_mode) <= bandwidth
+            )
+            nearby_r = np.flatnonzero(
+                np.abs(retained_indices - target_mode) <= bandwidth
+            )
+            columns = np.concatenate(
+                [previous_u, u + nearby_r, u + r + nearby_r]
+            ).astype(np.int64)
+            rows.append(columns)
+        return rows
+
+    def _modal_covariance(
+        self,
+        probability: FloatArray,
+        vectors: FloatArray,
+    ) -> FloatArray:
+        modal_probability = probability @ vectors
+        covariance = self.config.n_particles * (
+            vectors.T @ (probability[:, None] * vectors)
+            - np.outer(modal_probability, modal_probability)
+        )
+        return 0.5 * (covariance + covariance.T)
+
+    def _precompute_local_steps(
+        self,
+    ) -> tuple[LocalCompletionStep | None, list[LocalPersistentTransitionStep | None]]:
+        if self.omitted_modes == 0:
+            return None, [None] * max(self.config.n_steps - 1, 0)
+
+        probabilities = multinomial_node_probabilities(self.config)
+        transition = random_walk_transition_matrix(self.config)
+        vectors = self.full_basis.eigenvectors
+        transition_vectors = transition @ vectors
+        modal_means = self.config.n_particles * (probabilities @ vectors)
+        start = self.completion_start_step
+        r = self.retained_modes
+
+        start_covariance = self._modal_covariance(probabilities[start], vectors)
+        c_rr = start_covariance[:r, :r]
+        c_ur = start_covariance[r:, :r]
+        c_ru = start_covariance[:r, r:]
+        c_uu = start_covariance[r:, r:]
+        initial_gain = self._solve_sparse_gain(
+            c_ur,
+            c_rr,
+            self._initial_columns(),
+        )
+        initial_covariance = c_uu - initial_gain.to_dense() @ c_ru
+        initial = LocalCompletionStep(
+            retained_mean=modal_means[start, :r],
+            omitted_mean=modal_means[start, r:],
+            conditional_gain=initial_gain,
+            conditional_factor=self._low_rank_psd_factor(initial_covariance),
+        )
+
+        transitions: list[LocalPersistentTransitionStep | None] = [
+            None
+        ] * (self.config.n_steps - 1)
+        local_columns = self._transition_columns()
+        c_tt = start_covariance
+        for time_index in range(start, self.config.n_steps - 1):
+            p_t = probabilities[time_index]
+            p_next = probabilities[time_index + 1]
+            c_nn = self._modal_covariance(p_next, vectors)
+            q_t = p_t @ vectors
+            q_next = p_next @ vectors
+            cross_modal = self.config.n_particles * (
+                vectors.T @ (p_t[:, None] * transition_vectors)
+                - np.outer(q_t, q_next)
+            )
+
+            c_ut_ut = c_tt[r:, r:]
+            c_ut_rt = c_tt[r:, :r]
+            c_ut_rn = cross_modal[r:, :r]
+            c_rt_rt = c_tt[:r, :r]
+            c_rt_rn = cross_modal[:r, :r]
+            c_rn_rn = c_nn[:r, :r]
+            conditioning_covariance = np.block(
+                [
+                    [c_ut_ut, c_ut_rt, c_ut_rn],
+                    [c_ut_rt.T, c_rt_rt, c_rt_rn],
+                    [c_ut_rn.T, c_rt_rn.T, c_rn_rn],
+                ]
+            )
+            conditioning_covariance = 0.5 * (
+                conditioning_covariance + conditioning_covariance.T
+            )
+            target_conditioning_covariance = np.concatenate(
+                [
+                    cross_modal[r:, r:].T,
+                    cross_modal[:r, r:].T,
+                    c_nn[r:, :r],
+                ],
+                axis=1,
+            )
+            gain = self._solve_sparse_gain(
+                target_conditioning_covariance,
+                conditioning_covariance,
+                local_columns,
+            )
+            conditional_covariance = c_nn[r:, r:] - (
+                gain.to_dense() @ target_conditioning_covariance.T
+            )
+            conditioning_mean = np.concatenate(
+                [
+                    modal_means[time_index, r:],
+                    modal_means[time_index, :r],
+                    modal_means[time_index + 1, :r],
+                ]
+            )
+            transitions[time_index] = LocalPersistentTransitionStep(
+                conditioning_mean=conditioning_mean,
+                target_mean=modal_means[time_index + 1, r:],
+                conditional_gain=gain,
+                conditional_factor=self._low_rank_psd_factor(
+                    conditional_covariance
+                ),
+            )
+            c_tt = c_nn
+        return initial, transitions
+
+    def complete(
+        self,
+        raw_counts: FloatArray,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[FloatArray, FloatArray]:
+        """Return locally conditioned persistent completion."""
+
+        values = self._validate_counts(raw_counts)
+        if self.omitted_modes == 0:
+            return values.copy(), np.zeros_like(values)
+        generator = np.random.default_rng() if rng is None else rng
+        completed = values.copy()
+        additions = np.zeros_like(values)
+        retained_states = values @ self.retained_basis.eigenvectors
+        start = self.completion_start_step
+        initial = self._initial_step
+        if initial is None:
+            return completed, additions
+
+        unresolved_state = self._sample_gaussian(
+            initial.omitted_mean
+            + initial.conditional_gain.matvec(
+                retained_states[start] - initial.retained_mean
+            ),
+            initial.conditional_factor,
+            generator,
+        )
+        addition = self._spatial_addition(unresolved_state)
+        additions[start] = addition
+        completed[start] = values[start] + addition
+
+        for time_index in range(start, self.config.n_steps - 1):
+            parameters = self._transition_steps[time_index]
+            if parameters is None:
+                continue
+            conditioning_state = np.concatenate(
+                [
+                    unresolved_state,
+                    retained_states[time_index],
+                    retained_states[time_index + 1],
+                ]
+            )
+            unresolved_state = self._sample_gaussian(
+                parameters.target_mean
+                + parameters.conditional_gain.matvec(
+                    conditioning_state - parameters.conditioning_mean
+                ),
+                parameters.conditional_factor,
+                generator,
+            )
+            addition = self._spatial_addition(unresolved_state)
+            additions[time_index + 1] = addition
+            completed[time_index + 1] = values[time_index + 1] + addition
         return completed, additions

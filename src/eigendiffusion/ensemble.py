@@ -13,6 +13,7 @@ from .baselines import (
     naive_random_walk_diffusion,
 )
 from .completion import (
+    LocalPersistentUnresolvedGaussianCompleter,
     PersistentUnresolvedGaussianCompleter,
     UnresolvedGaussianCompleter,
 )
@@ -227,6 +228,7 @@ def apply_readout_ensemble(
     completion_start_time: float = 0.0,
     completion_rank: int | None = None,
     completion_ridge: float = 1.0e-2,
+    completion_bandwidth: int = 12,
     seed: int = 0,
 ) -> EnsembleResult:
     """Apply an output-only readout independently to every ensemble run.
@@ -243,22 +245,31 @@ def apply_readout_ensemble(
         "persistent_unresolved_completion_simplex_bank": (
             PersistentUnresolvedGaussianCompleter
         ),
+        "local_persistent_unresolved_completion": (
+            LocalPersistentUnresolvedGaussianCompleter
+        ),
+        "local_persistent_unresolved_completion_simplex_bank": (
+            LocalPersistentUnresolvedGaussianCompleter
+        ),
     }
     completion_constraints = {
         "unresolved_gaussian_completion_simplex_bank": "simplex_bank",
         "persistent_unresolved_completion_simplex_bank": "simplex_bank",
+        "local_persistent_unresolved_completion_simplex_bank": "simplex_bank",
     }
     completer_class = completion_readouts.get(readout)
     if completer_class is not None:
         if retained_modes is None:
             raise ValueError(f"{readout} requires retained_modes")
-        completer = completer_class(
-            config,
-            retained_modes=retained_modes,
-            completion_start_time=completion_start_time,
-            completion_rank=completion_rank,
-            ridge=completion_ridge,
-        )
+        completer_kwargs = {
+            "retained_modes": retained_modes,
+            "completion_start_time": completion_start_time,
+            "completion_rank": completion_rank,
+            "ridge": completion_ridge,
+        }
+        if completer_class is LocalPersistentUnresolvedGaussianCompleter:
+            completer_kwargs["modal_bandwidth"] = completion_bandwidth
+        completer = completer_class(config, **completer_kwargs)
     else:
         completer = None
 
@@ -301,6 +312,7 @@ def apply_readout_ensemble(
             completion_start_time=completion_start_time,
             completion_rank=completion_rank,
             completion_ridge=completion_ridge,
+            completion_bandwidth=completion_bandwidth,
             rng=rng,
         )
         processed.append(result.counts)

@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import cProfile
 import csv
 import gc
+import io
 import json
+import pstats
 from pathlib import Path
 
 import numpy as np
 
 from .benchmarking import (
     BENCHMARK_METHOD_NAMES,
+    DEFAULT_LOCAL_MODAL_BANDWIDTH,
     SELECTED_OPERATING_POINTS,
     benchmark_operating_points,
+    deep_numpy_nbytes,
     benchmark_diffusion_methods,
     benchmark_random_walks,
     stable_diffusion_config,
@@ -22,6 +27,10 @@ from .benchmarking import (
     write_operating_point_benchmark_csv,
 )
 from .config import DiffusionConfig
+from .completion import (
+    LocalPersistentUnresolvedGaussianCompleter,
+    PersistentUnresolvedGaussianCompleter,
+)
 from .distribution_metrics import summarize_distribution_ensemble
 from .ensemble import (
     MODAL_MODEL_NAMES,
@@ -48,6 +57,7 @@ from .plotting import (
     plot_mode_sweep,
     plot_model_comparison,
     plot_operating_point_study,
+    plot_structured_closure_study,
     plot_random_walk_benchmark,
     plot_temporal_correlation_comparison,
     plot_trial_convergence,
@@ -155,6 +165,12 @@ def _add_completion_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=1.0e-2,
         help="Ridge fraction used to stabilize Gaussian conditional completion.",
+    )
+    parser.add_argument(
+        "--completion-bandwidth",
+        type=int,
+        default=DEFAULT_LOCAL_MODAL_BANDWIDTH,
+        help="Modal-neighborhood radius for local persistent completion.",
     )
 
 
@@ -328,6 +344,7 @@ def _apply_selected_readout(
         completion_start_time=start_time,
         completion_rank=args.completion_rank,
         completion_ridge=args.completion_ridge,
+        completion_bandwidth=args.completion_bandwidth,
         seed=readout_seed,
     )
 
@@ -891,6 +908,7 @@ def run_readout_comparison(args: argparse.Namespace) -> int:
             completion_start_time=_resolved_completion_start_time(args),
             completion_rank=args.completion_rank,
             completion_ridge=args.completion_ridge,
+            completion_bandwidth=args.completion_bandwidth,
             seed=args.seed + 10_000,
         )
         label = f"{args.modal_model}+{readout_name}"
@@ -1898,11 +1916,12 @@ def run_operating_point_study(args: argparse.Namespace) -> int:
         completed = apply_readout_ensemble(
             raw,
             config,
-            readout="persistent_unresolved_completion_simplex_bank",
+            readout="local_persistent_unresolved_completion_simplex_bank",
             retained_modes=modes,
             completion_start_time=handoff_time,
             completion_rank=completion_rank,
             completion_ridge=args.completion_ridge,
+            completion_bandwidth=DEFAULT_LOCAL_MODAL_BANDWIDTH,
             seed=args.seed + 400_000 + point_index,
         )
         distribution = summarize_distribution_ensemble(
@@ -2026,6 +2045,527 @@ def run_operating_point_study(args: argparse.Namespace) -> int:
             f"sliced_W1={float(row['sliced_normalized_wasserstein']):.4f}"
         )
     print(f"\nRecommended default: {recommended_name}")
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def run_structured_closure_study(args: argparse.Namespace) -> int:
+    """Select and validate a sparse local persistent completion closure."""
+
+    output_directory = Path(args.output_directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    point = SELECTED_OPERATING_POINTS[2]
+
+    def make_config(
+        *,
+        nodes: int,
+        particles: int,
+        impulse_fraction: float,
+        diffusion: float,
+        length: float = 4.0,
+    ) -> DiffusionConfig:
+        return stable_diffusion_config(
+            n_particles=particles,
+            n_nodes=nodes,
+            total_time=args.total_time,
+            requested_dt=args.dt,
+            length=length,
+            diffusion_coefficient=diffusion,
+            impulse_fraction=impulse_fraction,
+            stability_safety=args.stability_safety,
+        )
+
+    def write_rows(rows: list[dict[str, object]], path: Path) -> None:
+        fieldnames: list[str] = []
+        for row in rows:
+            for key in row:
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def evaluate_runs(
+        config: DiffusionConfig,
+        reference_runs: np.ndarray,
+        model_runs: np.ndarray,
+        *,
+        time_indices: list[int],
+        node_indices: list[int],
+        start_step: int,
+        seed: int,
+    ) -> dict[str, float | int]:
+        distribution = summarize_distribution_ensemble(
+            reference_runs,
+            model_runs,
+            time_indices=time_indices,
+            node_indices=node_indices,
+            n_projections=args.projections,
+            histogram_bins=args.histogram_bins,
+            seed=seed,
+        )
+        analytic_mean = discrete_expected_diffusion(config)
+        analytic_variance = multinomial_marginal_variance(config)
+        analytic_covariance = multinomial_marginal_covariance(config)
+        moment = summarize_ensemble(
+            analytic_mean,
+            analytic_variance,
+            model_runs,
+            config.n_particles,
+            reference_covariance=analytic_covariance,
+            covariance_time_indices=time_indices,
+        )
+        origins = valid_time_origins(
+            config.n_steps,
+            1,
+            start_step=min(start_step, config.n_steps - 2),
+        )
+        exact_cross = multinomial_mean_cross_time_covariance(
+            config,
+            1,
+            start_indices=origins,
+        )
+        empirical_cross = empirical_mean_cross_time_covariance(
+            model_runs,
+            1,
+            start_indices=origins,
+        )
+        return {
+            **distribution.as_dict(),
+            "mean_relative_l2_error": moment.mean_relative_l2_error,
+            "variance_relative_l2_error": moment.variance_relative_l2_error,
+            "covariance_relative_frobenius_error": float(
+                moment.covariance_relative_frobenius_error
+            ),
+            "cross_time_covariance_relative_frobenius_error": (
+                relative_frobenius_error(exact_cross, empirical_cross)
+            ),
+            "mean_negative_mass_fraction": moment.mean_negative_mass_fraction,
+            "maximum_mass_error": moment.maximum_mass_error,
+        }
+
+    base_config = make_config(
+        nodes=args.accuracy_nodes,
+        particles=args.particles,
+        impulse_fraction=args.impulse_fraction,
+        diffusion=args.diffusion,
+    )
+    modes, handoff_time, completion_rank = point.scaled(
+        base_config.n_nodes,
+        float(base_config.times[-1]),
+    )
+    time_indices, selected_times = _nearest_time_indices(
+        base_config.times,
+        args.distribution_times,
+        exclude_zero=True,
+    )
+    node_indices = sorted(
+        {
+            min(base_config.n_nodes - 1, max(0, base_config.impulse_index + offset))
+            for offset in args.distribution_node_offsets
+        }
+    )
+    reference_a = run_random_walk_ensemble(
+        base_config,
+        n_runs=args.accuracy_runs,
+        seed=args.seed + 10_000,
+        method="multinomial",
+    )
+    reference_b = run_random_walk_ensemble(
+        base_config,
+        n_runs=args.accuracy_runs,
+        seed=args.seed + 20_000,
+        method="multinomial",
+    )
+    raw = run_modal_ensemble(
+        base_config,
+        n_runs=args.accuracy_runs,
+        model="handoff_correlated_modal",
+        n_modes=modes,
+        initial_n_modes=base_config.n_nodes,
+        handoff_time=handoff_time,
+        seed=args.seed + 30_000,
+    )
+    accuracy_rows: list[dict[str, float | int | str | None]] = []
+    floor = evaluate_runs(
+        base_config,
+        reference_a.runs,
+        reference_b.runs,
+        time_indices=time_indices,
+        node_indices=node_indices,
+        start_step=int(np.searchsorted(base_config.times, handoff_time)),
+        seed=args.seed,
+    )
+    accuracy_rows.append(
+        {"closure": "sampling_floor", "modal_bandwidth": 0, **floor}
+    )
+
+    dense = apply_readout_ensemble(
+        raw,
+        base_config,
+        readout="persistent_unresolved_completion_simplex_bank",
+        retained_modes=modes,
+        completion_start_time=handoff_time,
+        completion_rank=completion_rank,
+        completion_ridge=args.completion_ridge,
+        seed=args.seed + 40_000,
+    )
+    dense_metrics = evaluate_runs(
+        base_config,
+        reference_a.runs,
+        dense.runs,
+        time_indices=time_indices,
+        node_indices=node_indices,
+        start_step=int(np.searchsorted(base_config.times, handoff_time)),
+        seed=args.seed,
+    )
+    accuracy_rows.append(
+        {"closure": "dense", "modal_bandwidth": 0, **dense_metrics}
+    )
+    del dense
+    gc.collect()
+
+    for bandwidth_index, bandwidth in enumerate(sorted(set(args.bandwidths))):
+        local = apply_readout_ensemble(
+            raw,
+            base_config,
+            readout="local_persistent_unresolved_completion_simplex_bank",
+            retained_modes=modes,
+            completion_start_time=handoff_time,
+            completion_rank=completion_rank,
+            completion_ridge=args.completion_ridge,
+            completion_bandwidth=bandwidth,
+            seed=args.seed + 40_000,
+        )
+        local_metrics = evaluate_runs(
+            base_config,
+            reference_a.runs,
+            local.runs,
+            time_indices=time_indices,
+            node_indices=node_indices,
+            start_step=int(np.searchsorted(base_config.times, handoff_time)),
+            seed=args.seed,
+        )
+        accuracy_rows.append(
+            {
+                "closure": f"local_b{bandwidth}",
+                "modal_bandwidth": bandwidth,
+                **local_metrics,
+            }
+        )
+        del local
+        gc.collect()
+
+    acceptance_metrics = (
+        "mean_relative_l2_error",
+        "variance_relative_l2_error",
+        "covariance_relative_frobenius_error",
+        "cross_time_covariance_relative_frobenius_error",
+        "marginal_normalized_wasserstein",
+        "sliced_normalized_wasserstein",
+    )
+    eligible: list[dict[str, float | int | str | None]] = []
+    for row in accuracy_rows[2:]:
+        if all(
+            float(row[metric])
+            <= float(dense_metrics[metric])
+            + (
+                0.25
+                if metric == "cross_time_covariance_relative_frobenius_error"
+                else 1.0
+            )
+            * float(floor[metric])
+            for metric in acceptance_metrics
+        ):
+            eligible.append(row)
+    if eligible:
+        selected_row = min(eligible, key=lambda row: int(row["modal_bandwidth"]))
+    else:
+        selected_row = min(
+            accuracy_rows[2:],
+            key=lambda row: np.mean(
+                [
+                    float(row[metric])
+                    / max(float(dense_metrics[metric]), 1.0e-12)
+                    for metric in acceptance_metrics
+                ]
+            ),
+        )
+    selected_bandwidth = int(selected_row["modal_bandwidth"])
+    write_rows(
+        [dict(row) for row in accuracy_rows],
+        output_directory / "base_accuracy.csv",
+    )
+
+    heldout_cases = (
+        ("shifted_impulse", 101, args.particles, 0.35, args.diffusion, 4.0),
+        ("low_particles", 101, 2_000, args.impulse_fraction, args.diffusion, 4.0),
+        (
+            "high_diffusion",
+            101,
+            args.particles,
+            args.impulse_fraction,
+            2.0 * args.diffusion,
+            4.0,
+        ),
+        ("fine_grid", 151, args.particles, args.impulse_fraction, args.diffusion, 4.0),
+        ("long_domain", 101, args.particles, args.impulse_fraction, args.diffusion, 6.0),
+    )
+    heldout_rows: list[dict[str, float | int | str | None]] = []
+    for case_index, (
+        case_name,
+        nodes,
+        particles,
+        impulse_fraction,
+        diffusion,
+        length,
+    ) in enumerate(heldout_cases):
+        config = make_config(
+            nodes=nodes,
+            particles=particles,
+            impulse_fraction=impulse_fraction,
+            diffusion=diffusion,
+            length=length,
+        )
+        case_modes, case_handoff, case_rank = point.scaled(
+            config.n_nodes,
+            float(config.times[-1]),
+        )
+        case_times, _ = _nearest_time_indices(
+            config.times,
+            args.distribution_times,
+            exclude_zero=True,
+        )
+        case_nodes = sorted(
+            {
+                min(config.n_nodes - 1, max(0, config.impulse_index + offset))
+                for offset in args.distribution_node_offsets
+            }
+        )
+        reference = run_random_walk_ensemble(
+            config,
+            n_runs=args.heldout_runs,
+            seed=args.seed + 100_000 + case_index,
+            method="multinomial",
+        )
+        case_raw = run_modal_ensemble(
+            config,
+            n_runs=args.heldout_runs,
+            model="handoff_correlated_modal",
+            n_modes=case_modes,
+            initial_n_modes=config.n_nodes,
+            handoff_time=case_handoff,
+            seed=args.seed + 110_000 + case_index,
+        )
+        for closure_index, (closure_name, readout) in enumerate(
+            (
+                ("dense", "persistent_unresolved_completion_simplex_bank"),
+                (
+                    f"local_b{selected_bandwidth}",
+                    "local_persistent_unresolved_completion_simplex_bank",
+                ),
+            )
+        ):
+            completed = apply_readout_ensemble(
+                case_raw,
+                config,
+                readout=readout,
+                retained_modes=case_modes,
+                completion_start_time=case_handoff,
+                completion_rank=case_rank,
+                completion_ridge=args.completion_ridge,
+                completion_bandwidth=selected_bandwidth,
+                seed=args.seed + 120_000 + case_index,
+            )
+            metrics = evaluate_runs(
+                config,
+                reference.runs,
+                completed.runs,
+                time_indices=case_times,
+                node_indices=case_nodes,
+                start_step=int(np.searchsorted(config.times, case_handoff)),
+                seed=args.seed + closure_index,
+            )
+            heldout_rows.append(
+                {
+                    "case": case_name,
+                    "closure": closure_name,
+                    "nodes": nodes,
+                    "particles": particles,
+                    "impulse_fraction": impulse_fraction,
+                    "diffusion": diffusion,
+                    "length": length,
+                    "runs": args.heldout_runs,
+                    **metrics,
+                }
+            )
+            del completed
+            gc.collect()
+        del reference, case_raw
+        gc.collect()
+    write_rows(
+        [dict(row) for row in heldout_rows],
+        output_directory / "heldout_accuracy.csv",
+    )
+
+    profile_rows: list[dict[str, object]] = []
+    for closure_name, completer_class, kwargs in (
+        ("dense", PersistentUnresolvedGaussianCompleter, {}),
+        (
+            f"local_b{selected_bandwidth}",
+            LocalPersistentUnresolvedGaussianCompleter,
+            {"modal_bandwidth": selected_bandwidth},
+        ),
+    ):
+        profiler = cProfile.Profile()
+        profiler.enable()
+        completer = completer_class(
+            base_config,
+            retained_modes=modes,
+            completion_start_time=handoff_time,
+            completion_rank=completion_rank,
+            ridge=args.completion_ridge,
+            **kwargs,
+        )
+        profiler.disable()
+        stream = io.StringIO()
+        pstats.Stats(profiler, stream=stream).strip_dirs().sort_stats(
+            "cumulative"
+        ).print_stats(30)
+        (output_directory / f"{closure_name}_setup_profile.txt").write_text(
+            stream.getvalue(),
+            encoding="utf-8",
+        )
+        transitions = [
+            step for step in completer._transition_steps if step is not None
+        ]
+        profile_rows.append(
+            {
+                "closure": closure_name,
+                "total_array_bytes": deep_numpy_nbytes(completer),
+                "gain_array_bytes": deep_numpy_nbytes(
+                    [step.conditional_gain for step in transitions]
+                ),
+                "factor_array_bytes": deep_numpy_nbytes(
+                    [step.conditional_factor for step in transitions]
+                ),
+                "mean_array_bytes": deep_numpy_nbytes(
+                    [
+                        (step.conditioning_mean, step.target_mean)
+                        for step in transitions
+                    ]
+                ),
+            }
+        )
+        del completer
+        gc.collect()
+    write_rows(profile_rows, output_directory / "storage_profile.csv")
+
+    dense_benchmark = benchmark_operating_points(
+        node_counts=sorted(set(args.node_counts)),
+        n_particles=args.particles,
+        total_time=args.total_time,
+        requested_dt=args.dt,
+        length=4.0,
+        diffusion_coefficient=args.diffusion,
+        impulse_fraction=args.impulse_fraction,
+        operating_points=(point,),
+        completion_ridge=args.completion_ridge,
+        repeats=args.repeats,
+        amortization_runs=args.amortization_runs,
+        stability_safety=args.stability_safety,
+        seed=args.seed,
+        closure="dense_persistent",
+    )
+    local_benchmark = benchmark_operating_points(
+        node_counts=sorted(set(args.node_counts)),
+        n_particles=args.particles,
+        total_time=args.total_time,
+        requested_dt=args.dt,
+        length=4.0,
+        diffusion_coefficient=args.diffusion,
+        impulse_fraction=args.impulse_fraction,
+        operating_points=(point,),
+        completion_ridge=args.completion_ridge,
+        repeats=args.repeats,
+        amortization_runs=args.amortization_runs,
+        stability_safety=args.stability_safety,
+        seed=args.seed,
+        closure="local_persistent",
+        modal_bandwidth=selected_bandwidth,
+    )
+    benchmark_records = [*dense_benchmark, *local_benchmark]
+    write_operating_point_benchmark_csv(
+        benchmark_records,
+        output_directory / "scaling.csv",
+    )
+
+    largest_node = max(args.node_counts)
+    dense_largest = next(
+        row for row in dense_benchmark if row.n_nodes == largest_node
+    )
+    local_largest = next(
+        row for row in local_benchmark if row.n_nodes == largest_node
+    )
+    heldout_pass = all(
+        all(
+            float(row[metric])
+            <= float(
+                next(
+                    dense_row[metric]
+                    for dense_row in heldout_rows
+                    if dense_row["case"] == row["case"]
+                    and dense_row["closure"] == "dense"
+                )
+            )
+            + float(floor[metric])
+            for metric in acceptance_metrics
+        )
+        for row in heldout_rows
+        if str(row["closure"]).startswith("local")
+    )
+    scaling_pass = (
+        local_largest.setup_seconds < dense_largest.setup_seconds
+        and local_largest.resident_array_bytes < dense_largest.resident_array_bytes
+        and local_largest.peak_rss_bytes <= 1.05 * dense_largest.peak_rss_bytes
+    )
+    accepted = bool(eligible) and heldout_pass and scaling_pass
+    figure = plot_structured_closure_study(
+        accuracy_rows,
+        heldout_rows,
+        benchmark_records,
+        output_directory / "structured_closure.png",
+    )
+    summary = {
+        "selected_bandwidth": selected_bandwidth,
+        "base_accuracy_eligible": bool(eligible),
+        "heldout_pass": heldout_pass,
+        "scaling_pass": scaling_pass,
+        "accepted_as_default": accepted,
+        "production_default": (
+            f"local_persistent_bandwidth_{selected_bandwidth}"
+            if accepted
+            else "dense_persistent"
+        ),
+        "accuracy_runs": args.accuracy_runs,
+        "heldout_runs": args.heldout_runs,
+        "distribution_times": selected_times,
+        "largest_grid": {
+            "nodes": largest_node,
+            "dense_setup_seconds": dense_largest.setup_seconds,
+            "local_setup_seconds": local_largest.setup_seconds,
+            "dense_resident_mib": dense_largest.resident_array_megabytes,
+            "local_resident_mib": local_largest.resident_array_megabytes,
+            "dense_peak_rss_mib": dense_largest.peak_rss_megabytes,
+            "local_peak_rss_mib": local_largest.peak_rss_megabytes,
+        },
+        "figure": str(figure),
+    }
+    (output_directory / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n",
+        encoding="utf-8",
+    )
     print(json.dumps(summary, indent=2))
     return 0
 
@@ -2567,6 +3107,48 @@ def build_parser() -> argparse.ArgumentParser:
         default="outputs/operating_points/summary.json",
     )
     operating_points.set_defaults(handler=run_operating_point_study)
+
+    structured = subparsers.add_parser(
+        "study-structured-closure",
+        help=(
+            "Profile dense completion, select a local modal bandwidth, validate "
+            "held-out physics, and benchmark scaling."
+        ),
+    )
+    structured.add_argument("--node-counts", type=int, nargs="+", default=[51, 101, 151, 201])
+    structured.add_argument("--accuracy-nodes", type=int, default=101)
+    structured.add_argument("--particles", type=int, default=5_275)
+    structured.add_argument("--total-time", type=float, default=100.0)
+    structured.add_argument("--dt", type=float, default=1.0)
+    structured.add_argument("--diffusion", type=float, default=2.20e-4)
+    structured.add_argument("--impulse-fraction", type=float, default=0.59)
+    structured.add_argument("--completion-ridge", type=float, default=0.01)
+    structured.add_argument("--bandwidths", type=int, nargs="+", default=[4, 8, 12, 20])
+    structured.add_argument("--accuracy-runs", type=int, default=500)
+    structured.add_argument("--heldout-runs", type=int, default=250)
+    structured.add_argument("--repeats", type=int, default=3)
+    structured.add_argument("--amortization-runs", type=int, default=100)
+    structured.add_argument("--stability-safety", type=float, default=0.95)
+    structured.add_argument(
+        "--distribution-times",
+        type=float,
+        nargs="+",
+        default=[20.0, 50.0, 100.0],
+    )
+    structured.add_argument(
+        "--distribution-node-offsets",
+        type=int,
+        nargs="+",
+        default=[-10, 0, 10],
+    )
+    structured.add_argument("--projections", type=int, default=64)
+    structured.add_argument("--histogram-bins", type=int, default=30)
+    structured.add_argument("--seed", type=int, default=6)
+    structured.add_argument(
+        "--output-directory",
+        default="outputs/structured_closure",
+    )
+    structured.set_defaults(handler=run_structured_closure_study)
 
     benchmark = subparsers.add_parser(
         "benchmark-random-walk",

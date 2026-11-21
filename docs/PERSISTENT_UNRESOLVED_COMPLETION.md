@@ -85,6 +85,12 @@ The new readout does not replace:
 - `raw`, Delta-Sigma, and bank readouts;
 - any modal dynamics model.
 
+The later `local_persistent_unresolved_completion` implementation preserves
+this dense method as a reference while replacing its time-indexed dense gains
+with validated bandwidth-12 row-sparse modal gains. Selected-pipeline workflows
+use the local closure by default; see
+[structured local closure](STRUCTURED_LOCAL_CLOSURE.md).
+
 ## Recommended experiment
 
 ```bash

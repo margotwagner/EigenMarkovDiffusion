@@ -1,6 +1,9 @@
 import numpy as np
 
-from eigendiffusion.completion import PersistentUnresolvedGaussianCompleter
+from eigendiffusion.completion import (
+    LocalPersistentUnresolvedGaussianCompleter,
+    PersistentUnresolvedGaussianCompleter,
+)
 from eigendiffusion.config import DiffusionConfig
 from eigendiffusion.ensemble import apply_readout_ensemble, run_modal_ensemble
 from eigendiffusion.temporal import (
@@ -192,3 +195,65 @@ def test_persistent_completion_rank_is_capped() -> None:
         completion_rank=100,
     )
     assert completer.completion_rank == 1
+
+
+def test_local_persistent_matches_dense_at_full_bandwidth() -> None:
+    config = DiffusionConfig(
+        n_particles=200,
+        n_nodes=11,
+        n_steps=8,
+        impulse_index=5,
+        dt=1.0,
+        length=4.0,
+        diffusion_coefficient=2.20e-4,
+    )
+    raw = run_modal_ensemble(
+        config,
+        n_runs=1,
+        model="handoff_correlated_modal",
+        n_modes=6,
+        initial_n_modes=11,
+        handoff_time=2.0,
+        seed=50,
+    ).runs[0]
+    dense = PersistentUnresolvedGaussianCompleter(
+        config,
+        retained_modes=6,
+        completion_start_time=2.0,
+        completion_rank=3,
+    )
+    local = LocalPersistentUnresolvedGaussianCompleter(
+        config,
+        retained_modes=6,
+        completion_start_time=2.0,
+        completion_rank=3,
+        modal_bandwidth=11,
+    )
+    dense_counts, _ = dense.complete(raw, rng=np.random.default_rng(51))
+    local_counts, _ = local.complete(raw, rng=np.random.default_rng(51))
+    np.testing.assert_allclose(local_counts, dense_counts, atol=1.0e-8)
+
+
+def test_local_persistent_simplex_readout_is_physical() -> None:
+    config = persistent_config()
+    raw = run_modal_ensemble(
+        config,
+        n_runs=2,
+        model="handoff_correlated_modal",
+        n_modes=15,
+        initial_n_modes=config.n_nodes,
+        handoff_time=10.0,
+        seed=52,
+    )
+    completed = apply_readout_ensemble(
+        raw,
+        config,
+        readout="local_persistent_unresolved_completion_simplex_bank",
+        retained_modes=15,
+        completion_start_time=10.0,
+        completion_rank=5,
+        completion_bandwidth=4,
+        seed=53,
+    )
+    assert np.min(completed.runs) >= 0.0
+    np.testing.assert_allclose(completed.runs.sum(axis=-1), 1000.0, atol=1.0e-9)
