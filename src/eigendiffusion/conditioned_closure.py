@@ -58,6 +58,31 @@ def _condition_basis(coordinates: FloatArray, degree: int) -> FloatArray:
     return np.asarray(terms, dtype=float)
 
 
+def _raw_target_coordinates(
+    config: DiffusionConfig,
+    *,
+    retained_modes: int,
+    target: int,
+    eigenvalue: float,
+    time_fraction: float,
+) -> FloatArray:
+    """Configuration and target coordinates for one local coefficient row."""
+
+    return np.concatenate(
+        (
+            physics_coordinates(config),
+            np.asarray(
+                [
+                    target / max(config.n_nodes - 1, 1),
+                    np.log1p(max(eigenvalue * config.dt, 0.0)),
+                    retained_modes / config.n_nodes,
+                    time_fraction,
+                ]
+            ),
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PhysicsConditionedRegressionModel:
     """Joint sparse regression whose coefficients vary with physical coordinates."""
@@ -74,17 +99,54 @@ class PhysicsConditionedRegressionModel:
     def feature_width(self) -> int:
         return 2 * self.bandwidth + 1
 
-    def condition(self, config: DiffusionConfig) -> FloatArray:
-        normalized = (
-            physics_coordinates(config) - self.descriptor_center
-        ) / self.descriptor_scale
-        return _condition_basis(normalized, self.degree)
-
-    def coefficients(self, config: DiffusionConfig) -> tuple[FloatArray, FloatArray]:
-        condition = self.condition(config)
+    def target_coefficients(
+        self,
+        config: DiffusionConfig,
+        *,
+        retained_modes: int,
+        time_fraction: float,
+        eigenvalues: FloatArray | None = None,
+    ) -> tuple[FloatArray, FloatArray]:
+        modal_eigenvalues = (
+            _canonical_basis(config).eigenvalues
+            if eigenvalues is None
+            else np.asarray(eigenvalues, dtype=float)
+        )
+        targets = np.arange(retained_modes, config.n_nodes)
+        conditions = np.stack(
+            [
+                _condition_basis(
+                    (
+                        _raw_target_coordinates(
+                            config,
+                            retained_modes=retained_modes,
+                            target=int(target),
+                            eigenvalue=float(modal_eigenvalues[target]),
+                            time_fraction=time_fraction,
+                        )
+                        - self.descriptor_center
+                    )
+                    / self.descriptor_scale,
+                    self.degree,
+                )
+                for target in targets
+            ]
+        )
+        frequency_bins = np.minimum(
+            self.n_frequency_bins - 1,
+            (targets * self.n_frequency_bins) // max(config.n_nodes - 1, 1),
+        )
         return (
-            np.einsum("p,bpw->bw", condition, self.initial_coefficient_basis),
-            np.einsum("p,bpw->bw", condition, self.transition_coefficient_basis),
+            np.einsum(
+                "up,upw->uw",
+                conditions,
+                self.initial_coefficient_basis[frequency_bins],
+            ),
+            np.einsum(
+                "up,upw->uw",
+                conditions,
+                self.transition_coefficient_basis[frequency_bins],
+            ),
         )
 
     @classmethod
@@ -103,15 +165,39 @@ class PhysicsConditionedRegressionModel:
 
         if not cases:
             raise ValueError("cases must not be empty")
-        descriptors = np.stack([physics_coordinates(case.config) for case in cases])
+        coordinate_rows: list[FloatArray] = []
+        for case in cases:
+            config = case.config
+            basis = _canonical_basis(config)
+            start = int(np.argmin(np.abs(config.times - case.handoff_time)))
+            for target in range(case.retained_modes, config.n_nodes):
+                coordinate_rows.append(
+                    _raw_target_coordinates(
+                        config,
+                        retained_modes=case.retained_modes,
+                        target=target,
+                        eigenvalue=float(basis.eigenvalues[target]),
+                        time_fraction=0.0,
+                    )
+                )
+                for time_index in range(start, config.n_steps - 1):
+                    fraction = (time_index - start) / max(
+                        config.n_steps - start - 2, 1
+                    )
+                    coordinate_rows.append(
+                        _raw_target_coordinates(
+                            config,
+                            retained_modes=case.retained_modes,
+                            target=target,
+                            eigenvalue=float(basis.eigenvalues[target]),
+                            time_fraction=fraction,
+                        )
+                    )
+        descriptors = np.stack(coordinate_rows)
         center = np.mean(descriptors, axis=0)
         scale = np.std(descriptors, axis=0, ddof=0)
         scale[scale < 1.0e-12] = 1.0
-        conditions = [
-            _condition_basis((descriptor - center) / scale, degree)
-            for descriptor in descriptors
-        ]
-        condition_width = conditions[0].size
+        condition_width = _condition_basis(np.zeros(center.size), degree).size
         width = 2 * bandwidth + 1
         transition_width = 3 * width
         initial_size = condition_width * width
@@ -126,7 +212,7 @@ class PhysicsConditionedRegressionModel:
         transition_xy = np.zeros((n_frequency_bins, transition_size), dtype=float)
         generator = np.random.default_rng(seed)
 
-        for case, condition in zip(cases, conditions, strict=True):
+        for case in cases:
             config = case.config
             runs = np.asarray(case.runs, dtype=float)
             retained = case.retained_modes
@@ -138,6 +224,20 @@ class PhysicsConditionedRegressionModel:
                 config.n_particles
             )
             for target in range(retained, config.n_nodes):
+                initial_condition = _condition_basis(
+                    (
+                        _raw_target_coordinates(
+                            config,
+                            retained_modes=retained,
+                            target=target,
+                            eigenvalue=float(basis.eigenvalues[target]),
+                            time_fraction=0.0,
+                        )
+                        - center
+                    )
+                    / scale,
+                    degree,
+                )
                 frequency_bin = min(
                     n_frequency_bins - 1,
                     int(target / max(config.n_nodes - 1, 1) * n_frequency_bins),
@@ -149,7 +249,7 @@ class PhysicsConditionedRegressionModel:
                     :, start, sources[valid_retained]
                 ]
                 conditioned_initial = (
-                    condition[None, :, None] * initial_features[:, None, :]
+                    initial_condition[None, :, None] * initial_features[:, None, :]
                 ).reshape(runs.shape[0], initial_size)
                 initial_target = deviation[:, start, target]
                 initial_xx[frequency_bin] += conditioned_initial.T @ conditioned_initial
@@ -173,6 +273,30 @@ class PhysicsConditionedRegressionModel:
                 ] = deviation[:, start + 1 :, sources[valid_retained]]
                 flattened = transition_features.reshape(-1, transition_width)
                 target_values = deviation[:, start + 1 :, target].reshape(-1)
+                time_conditions = np.stack(
+                    [
+                        _condition_basis(
+                            (
+                                _raw_target_coordinates(
+                                    config,
+                                    retained_modes=retained,
+                                    target=target,
+                                    eigenvalue=float(basis.eigenvalues[target]),
+                                    time_fraction=time_index
+                                    / max(transition_count - 1, 1),
+                                )
+                                - center
+                            )
+                            / scale,
+                            degree,
+                        )
+                        for time_index in range(transition_count)
+                    ]
+                )
+                condition_rows = np.broadcast_to(
+                    time_conditions[None, :, :],
+                    (runs.shape[0], transition_count, condition_width),
+                ).reshape(-1, condition_width)
                 if flattened.shape[0] > max_regression_samples_per_target:
                     selected = generator.choice(
                         flattened.shape[0],
@@ -181,8 +305,9 @@ class PhysicsConditionedRegressionModel:
                     )
                     flattened = flattened[selected]
                     target_values = target_values[selected]
+                    condition_rows = condition_rows[selected]
                 conditioned_transition = (
-                    condition[None, :, None] * flattened[:, None, :]
+                    condition_rows[:, :, None] * flattened[:, None, :]
                 ).reshape(flattened.shape[0], transition_size)
                 transition_xx[frequency_bin] += (
                     conditioned_transition.T @ conditioned_transition
@@ -266,29 +391,154 @@ class PhysicsConditionedLocalCompleter:
         retained_modes: int,
         completion_start_time: float,
     ) -> None:
-        initial, transition = model.regression.coefficients(config)
-        self._completer = AnchoredFittedLocalCompleter(
+        self.config = config
+        self.model = model
+        self.retained_modes = retained_modes
+        self._base = AnchoredFittedLocalCompleter(
             config,
             model.innovations,
             retained_modes=retained_modes,
             completion_start_time=completion_start_time,
-            initial_coefficients=initial,
-            transition_coefficients=transition,
         )
+        self._initial_coefficients, _ = model.regression.target_coefficients(
+            config,
+            retained_modes=retained_modes,
+            time_fraction=0.0,
+            eigenvalues=self._base.full_basis.eigenvalues,
+        )
+        start = self._base.completion_start_step
+        self._transition_coefficients = tuple(
+            model.regression.target_coefficients(
+                config,
+                retained_modes=retained_modes,
+                time_fraction=(time_index - start)
+                / max(config.n_steps - start - 2, 1),
+                eigenvalues=self._base.full_basis.eigenvalues,
+            )[1]
+            for time_index in range(start, config.n_steps - 1)
+        )
+
+    def _predict_initial(
+        self,
+        deviations: FloatArray,
+        coefficients: FloatArray,
+    ) -> FloatArray:
+        targets = np.arange(self.retained_modes, self.config.n_nodes)[:, None]
+        offsets = np.arange(
+            -self.model.regression.bandwidth,
+            self.model.regression.bandwidth + 1,
+        )[None, :]
+        sources = targets + offsets
+        valid = (sources >= 0) & (sources < self.retained_modes)
+        features = deviations[:, np.clip(sources, 0, self.config.n_nodes - 1)]
+        return np.sum(features * valid[None, :, :] * coefficients[None], axis=2)
+
+    def _predict_transition(
+        self,
+        current: FloatArray,
+        next_retained: FloatArray,
+        coefficients: FloatArray,
+    ) -> FloatArray:
+        targets = np.arange(self.retained_modes, self.config.n_nodes)[:, None]
+        offsets = np.arange(
+            -self.model.regression.bandwidth,
+            self.model.regression.bandwidth + 1,
+        )[None, :]
+        sources = targets + offsets
+        unresolved_valid = (sources >= self.retained_modes) & (
+            sources < self.config.n_nodes
+        )
+        retained_valid = (sources >= 0) & (sources < self.retained_modes)
+        full_sources = np.clip(sources, 0, self.config.n_nodes - 1)
+        retained_sources = np.clip(sources, 0, self.retained_modes - 1)
+        features = np.concatenate(
+            (
+                current[:, full_sources] * unresolved_valid[None],
+                current[:, full_sources] * retained_valid[None],
+                next_retained[:, retained_sources] * retained_valid[None],
+            ),
+            axis=2,
+        )
+        return np.sum(features * coefficients[None], axis=2)
 
     def complete(
         self,
         raw_counts: FloatArray,
         rng: np.random.Generator | None = None,
     ) -> tuple[FloatArray, FloatArray]:
-        return self._completer.complete(raw_counts, rng=rng)
+        values = np.asarray(raw_counts, dtype=float)
+        expected = (self.config.n_steps, self.config.n_nodes)
+        if values.shape != expected:
+            raise ValueError("raw_counts shape does not match configuration")
+        completed, additions = self.complete_batch(values[None], rng=rng)
+        return completed[0], additions[0]
 
     def complete_batch(
         self,
         raw_counts: FloatArray,
         rng: np.random.Generator | None = None,
     ) -> tuple[FloatArray, FloatArray]:
-        return self._completer.complete_batch(raw_counts, rng=rng)
+        values = np.asarray(raw_counts, dtype=float)
+        expected = (self.config.n_steps, self.config.n_nodes)
+        if values.ndim != 3 or values.shape[1:] != expected:
+            raise ValueError("raw_counts batch shape does not match configuration")
+        generator = np.random.default_rng() if rng is None else rng
+        base = self._base
+        completed = values.copy()
+        additions = np.zeros_like(values)
+        retained_states = values @ base.retained_basis.eigenvectors
+        scale = np.sqrt(self.config.n_particles)
+        retained_deviation = (
+            retained_states
+            - base.modal_mean[None, :, : self.retained_modes]
+        ) / scale
+        start = base.completion_start_step
+        batch_size = values.shape[0]
+        full_deviation = np.zeros((batch_size, self.config.n_nodes), dtype=float)
+        full_deviation[:, : self.retained_modes] = retained_deviation[:, start]
+        innovation = base._sample_innovations(
+            generator,
+            time_bin=None,
+            batch_size=batch_size,
+        )
+        unresolved = self._predict_initial(
+            full_deviation, self._initial_coefficients
+        ) + innovation @ base._from_grid.T
+
+        def store(time_index: int) -> None:
+            modal_state = base.modal_mean[time_index, self.retained_modes :] + (
+                scale * unresolved
+            )
+            addition = modal_state @ base.omitted_eigenvectors.T
+            addition -= np.mean(addition, axis=1, keepdims=True)
+            additions[:, time_index] = addition
+            completed[:, time_index] = values[:, time_index] + addition
+
+        store(start)
+        for time_index in range(start, self.config.n_steps - 1):
+            full_deviation[:, : self.retained_modes] = retained_deviation[:, time_index]
+            full_deviation[:, self.retained_modes :] = unresolved
+            time_fraction = (time_index - start) / max(
+                self.config.n_steps - start - 2, 1
+            )
+            unresolved = self._predict_transition(
+                full_deviation,
+                retained_deviation[:, time_index + 1],
+                self._transition_coefficients[time_index - start],
+            )
+            time_bin = min(
+                self.model.innovations.n_time_bins - 1,
+                int(time_fraction * self.model.innovations.n_time_bins),
+            )
+            innovation = base._sample_innovations(
+                generator,
+                time_bin=time_bin,
+                batch_size=batch_size,
+                previous=innovation,
+            )
+            unresolved += innovation @ base._from_grid.T
+            store(time_index + 1)
+        return completed, additions
 
 
 def complete_conditioned_ensemble(
@@ -336,30 +586,53 @@ def conditioned_prediction_error(
         modal = np.asarray(case.runs, dtype=float) @ basis.eigenvectors
         modal_mean = discrete_expected_diffusion(config) @ basis.eigenvectors
         deviation = (modal - modal_mean[None, :, :]) / np.sqrt(config.n_particles)
-        initial_coefficients, transition_coefficients = model.coefficients(config)
-        from .fitted_closure import FittedLocalClosureModel
-
-        prototype = FittedLocalClosureModel(
-            bandwidth=model.bandwidth,
-            n_frequency_bins=model.n_frequency_bins,
-            n_time_bins=1,
-            residual_grid_size=1,
-            initial_coefficients=initial_coefficients,
-            transition_coefficients=transition_coefficients,
-            initial_residual_bank=np.empty((0, 1)),
-            transition_residual_banks=(np.empty((0, 1)),),
+        initial_coefficients, _ = model.target_coefficients(
+            config,
+            retained_modes=retained,
+            time_fraction=0.0,
+            eigenvalues=basis.eigenvalues,
         )
+        targets = np.arange(retained, config.n_nodes)[:, None]
+        offsets = np.arange(-model.bandwidth, model.bandwidth + 1)[None, :]
+        sources = targets + offsets
+        retained_valid = (sources >= 0) & (sources < retained)
+        full_sources = np.clip(sources, 0, config.n_nodes - 1)
+        retained_sources = np.clip(sources, 0, retained - 1)
         initial_target = deviation[:, start, retained:]
-        initial_prediction = prototype._predict_initial(deviation[:, start], retained)
+        initial_features = (
+            deviation[:, start, full_sources] * retained_valid[None, :, :]
+        )
+        initial_prediction = np.sum(
+            initial_features * initial_coefficients[None], axis=2
+        )
         initial_numerator += float(np.sum((initial_target - initial_prediction) ** 2))
         initial_denominator += float(np.sum(initial_target**2))
         for time_index in range(start, config.n_steps - 1):
-            target = deviation[:, time_index + 1, retained:]
-            prediction = prototype._predict_transition(
-                deviation[:, time_index],
-                deviation[:, time_index + 1, :retained],
-                retained,
+            time_fraction = (time_index - start) / max(
+                config.n_steps - start - 2, 1
             )
+            _, transition_coefficients = model.target_coefficients(
+                config,
+                retained_modes=retained,
+                time_fraction=time_fraction,
+                eigenvalues=basis.eigenvalues,
+            )
+            target = deviation[:, time_index + 1, retained:]
+            unresolved_valid = (sources >= retained) & (sources < config.n_nodes)
+            features = np.concatenate(
+                (
+                    deviation[:, time_index, full_sources]
+                    * unresolved_valid[None],
+                    deviation[:, time_index, full_sources]
+                    * retained_valid[None],
+                    deviation[:, time_index + 1, :retained][
+                        :, retained_sources
+                    ]
+                    * retained_valid[None],
+                ),
+                axis=2,
+            )
+            prediction = np.sum(features * transition_coefficients[None], axis=2)
             transition_numerator += float(np.sum((target - prediction) ** 2))
             transition_denominator += float(np.sum(target**2))
     return (

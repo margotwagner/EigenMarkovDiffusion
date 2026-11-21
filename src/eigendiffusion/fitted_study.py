@@ -131,6 +131,13 @@ def run_fitted_closure_study(args) -> int:
             (201, 5_000, 0.55, 1.65e-4, 4.5),
         )
     )
+    if physics_conditioned and args.use_bridge_anchors:
+        training_specs += (
+            (126, 5_292, 0.592, 2.2045407685e-4, 4.9749371855),
+            (114, 5_612, 0.577, 2.3237900077e-4, 4.8062459363),
+            (176, 5_244, 0.5733333333, 2.2e-4, 4.0),
+            (151, 5_745, 0.625, 2.2978250586e-4, 3.8987177379),
+        )
     training_cases: list[FittedClosureTrainingCase] = []
     training_manifest: list[dict[str, object]] = []
     for case_index, spec in enumerate(training_specs):
@@ -219,6 +226,42 @@ def run_fitted_closure_study(args) -> int:
             output_directory / "recommended_anchor_expansion.csv",
             count=args.recommended_anchor_count,
         )
+        with conditioning_cv_path.open(newline="", encoding="utf-8") as handle:
+            cv_rows = list(csv.DictReader(handle))
+        selected_cv_errors = [
+            float(row["combined_prediction_error"])
+            for row in cv_rows
+            if int(row["degree"]) == selected_conditioning_degree
+        ]
+        cv_mean_error = float(np.mean(selected_cv_errors))
+        cv_max_error = float(np.max(selected_cv_errors))
+        cv_gate_pass = (
+            cv_mean_error <= args.cv_mean_threshold
+            and cv_max_error <= args.cv_max_threshold
+        )
+        if args.gate_before_lockbox and not cv_gate_pass:
+            summary = {
+                "training_cases": len(training_specs),
+                "training_runs_per_case": args.training_runs,
+                "conditioning_degree": selected_conditioning_degree,
+                "cv_mean_error": cv_mean_error,
+                "cv_max_error": cv_max_error,
+                "cv_mean_threshold": args.cv_mean_threshold,
+                "cv_max_threshold": args.cv_max_threshold,
+                "cv_gate_pass": False,
+                "lockbox_opened": False,
+                "production_default": "analytic_local_bandwidth_12",
+                "conditioning_cross_validation_csv": str(conditioning_cv_path),
+                "recommended_anchor_expansion_csv": str(
+                    anchor_recommendations_path
+                ),
+            }
+            summary_path = output_directory / "prelockbox_summary.json"
+            summary_path.write_text(
+                json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+            )
+            print(json.dumps(summary, indent=2))
+            return 0
     if physics_conditioned:
         innovations = AnchoredFittedClosureModel.fit(
             training_cases,
@@ -278,14 +321,63 @@ def run_fitted_closure_study(args) -> int:
     del training_cases
     gc.collect()
 
-    validation_specs = (
-        ("base_unseen", (101, 5_275, 0.59, 2.2e-4, 4.0), args.validation_runs),
-        ("unseen_impulse", (101, 5_275, 0.37, 2.2e-4, 4.0), args.heldout_runs),
-        ("unseen_particles", (101, 6_500, 0.59, 2.2e-4, 4.0), args.heldout_runs),
-        ("unseen_diffusion", (101, 5_275, 0.59, 3.0e-4, 4.0), args.heldout_runs),
-        ("unseen_grid", (126, 5_275, 0.59, 2.2e-4, 4.0), args.heldout_runs),
-        ("unseen_domain", (101, 5_275, 0.59, 2.2e-4, 6.0), args.heldout_runs),
-    )
+    if args.run_lockbox:
+        with Path(args.lockbox_manifest).open(newline="", encoding="utf-8") as handle:
+            lockbox_rows = list(csv.DictReader(handle))
+        validation_specs = tuple(
+            (
+                row["case"],
+                (
+                    int(row["nodes"]),
+                    int(row["particles"]),
+                    float(row["impulse_fraction"]),
+                    float(row["diffusion"]),
+                    float(row["length"]),
+                ),
+                int(row["runs"]),
+                int(row["seed"]),
+            )
+            for row in lockbox_rows
+        )
+    else:
+        validation_specs = (
+            (
+                "base_unseen",
+                (101, 5_275, 0.59, 2.2e-4, 4.0),
+                args.validation_runs,
+                args.seed + 10_000,
+            ),
+            (
+                "unseen_impulse",
+                (101, 5_275, 0.37, 2.2e-4, 4.0),
+                args.heldout_runs,
+                args.seed + 10_001,
+            ),
+            (
+                "unseen_particles",
+                (101, 6_500, 0.59, 2.2e-4, 4.0),
+                args.heldout_runs,
+                args.seed + 10_002,
+            ),
+            (
+                "unseen_diffusion",
+                (101, 5_275, 0.59, 3.0e-4, 4.0),
+                args.heldout_runs,
+                args.seed + 10_003,
+            ),
+            (
+                "unseen_grid",
+                (126, 5_275, 0.59, 2.2e-4, 4.0),
+                args.heldout_runs,
+                args.seed + 10_004,
+            ),
+            (
+                "unseen_domain",
+                (101, 5_275, 0.59, 2.2e-4, 6.0),
+                args.heldout_runs,
+                args.seed + 10_005,
+            ),
+        )
     validation_rows: list[dict[str, object]] = []
     floor_metrics: dict[str, float | int] | None = None
 
@@ -352,7 +444,9 @@ def run_fitted_closure_study(args) -> int:
             "retained_modes": modes,
         }
 
-    for case_index, (case_name, spec, n_runs) in enumerate(validation_specs):
+    for case_index, (case_name, spec, n_runs, case_seed) in enumerate(
+        validation_specs
+    ):
         config = config_for(spec)
         modes, handoff_time, completion_rank = point.scaled(
             config.n_nodes,
@@ -361,14 +455,14 @@ def run_fitted_closure_study(args) -> int:
         reference = run_random_walk_ensemble(
             config,
             n_runs=n_runs,
-            seed=args.seed + 10_000 + case_index,
+            seed=case_seed,
             method="multinomial",
         )
-        if case_name == "base_unseen":
+        if case_index == 0:
             second_reference = run_random_walk_ensemble(
                 config,
                 n_runs=n_runs,
-                seed=args.seed + 20_000,
+                seed=case_seed + 10_000,
                 method="multinomial",
             )
             floor_metrics = evaluate(
@@ -395,7 +489,7 @@ def run_fitted_closure_study(args) -> int:
             n_modes=modes,
             initial_n_modes=config.n_nodes,
             handoff_time=handoff_time,
-            seed=args.seed + 30_000 + case_index,
+            seed=case_seed + 20_000,
         )
         analytic = apply_readout_ensemble(
             raw,
@@ -405,7 +499,7 @@ def run_fitted_closure_study(args) -> int:
             completion_start_time=handoff_time,
             completion_rank=completion_rank,
             completion_bandwidth=args.bandwidth,
-            seed=args.seed + 40_000 + case_index,
+            seed=case_seed + 30_000,
         )
         if physics_conditioned:
             fitted = complete_conditioned_ensemble(
@@ -414,7 +508,7 @@ def run_fitted_closure_study(args) -> int:
                 model,
                 retained_modes=modes,
                 completion_start_time=handoff_time,
-                seed=args.seed + 40_000 + case_index,
+                seed=case_seed + 30_000,
                 apply_simplex_bank=True,
             )
         elif anchored:
@@ -424,7 +518,7 @@ def run_fitted_closure_study(args) -> int:
                 model,
                 retained_modes=modes,
                 completion_start_time=handoff_time,
-                seed=args.seed + 40_000 + case_index,
+                seed=case_seed + 30_000,
                 apply_simplex_bank=True,
             )
         else:
@@ -434,7 +528,7 @@ def run_fitted_closure_study(args) -> int:
                 model,
                 retained_modes=modes,
                 completion_start_time=handoff_time,
-                seed=args.seed + 40_000 + case_index,
+                seed=case_seed + 30_000,
                 apply_simplex_bank=True,
             )
         for model_name, runs in (
@@ -584,6 +678,7 @@ def run_fitted_closure_study(args) -> int:
         "accuracy_pass": accuracy_pass,
         "scaling_pass": scaling_pass,
         "accepted_as_default": accepted,
+        "lockbox_opened": bool(args.run_lockbox),
         "production_default": (
             candidate_model if accepted else "analytic_local_bandwidth_12"
         ),

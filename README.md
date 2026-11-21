@@ -214,6 +214,11 @@ error modestly but also fails the frozen gates; cross-validation now supplies
 a targeted bridge-anchor design. These models remain experimental; see
 [fitted closure study](docs/FITTED_CLOSURE_STUDY.md).
 
+The subsequent 16-anchor target-conditioned model failed its predeclared
+configuration-CV gate, so the newly frozen lockbox was not opened. This avoids
+spending an unbiased test set on an architecture that has not demonstrated
+adequate transfer.
+
 ## Repository layout
 
 ```text

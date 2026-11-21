@@ -1043,7 +1043,12 @@ def plot_fitted_closure_study(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 3, figsize=(14, 8.2))
-    base_rows = [row for row in validation_rows if row["case"] == "base_unseen"]
+    base_case = next(
+        str(row["case"])
+        for row in validation_rows
+        if row["model"] == "sampling_floor"
+    )
+    base_rows = [row for row in validation_rows if row["case"] == base_case]
     base_models = [row for row in base_rows if row["model"] != "sampling_floor"]
     metrics = (
         ("variance_relative_l2_error", "variance"),
@@ -1073,7 +1078,7 @@ def plot_fitted_closure_study(
     cases = []
     for row in validation_rows:
         case = str(row["case"])
-        if case != "base_unseen" and case not in cases:
+        if case != base_case and case not in cases:
             cases.append(case)
     analytic = {
         str(row["case"]): row

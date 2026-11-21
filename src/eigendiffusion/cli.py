@@ -3192,10 +3192,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         nargs="+",
         choices=[1, 2],
-        default=[1, 2],
+        default=[1],
     )
     fitted.add_argument("--conditioning-folds", type=int, default=3)
     fitted.add_argument("--recommended-anchor-count", type=int, default=4)
+    fitted.add_argument("--use-bridge-anchors", action="store_true")
+    fitted.add_argument("--gate-before-lockbox", action="store_true")
+    fitted.add_argument("--run-lockbox", action="store_true")
+    fitted.add_argument("--cv-mean-threshold", type=float, default=0.87)
+    fitted.add_argument("--cv-max-threshold", type=float, default=1.05)
+    fitted.add_argument(
+        "--lockbox-manifest",
+        default="configs/fitted_closure_lockbox.csv",
+    )
     fitted.add_argument("--innovation-rank", type=int, default=12)
     fitted.add_argument("--nearest-anchors", type=int, default=3)
     fitted.add_argument(

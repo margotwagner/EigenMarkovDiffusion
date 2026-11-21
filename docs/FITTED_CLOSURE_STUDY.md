@@ -130,3 +130,27 @@ Original outputs are under `outputs/fitted_closure/`; conditioned outputs are
 under `outputs/anchored_fitted_closure/`; persistence and ablation outputs are
 under `outputs/anchored_persistent_fitted_closure/`; conditioned-regression and
 anchor-design outputs are under `outputs/physics_conditioned_fitted_closure/`.
+
+## Target-conditioned bridge-anchor gate
+
+A new six-case lockbox was frozen in
+`configs/fitted_closure_lockbox.csv` before the next model change. The training
+set was then expanded with the four recommended bridge anchors, giving 16
+anchors and 100 trajectories per anchor. The joint regression was extended
+with target modal index, modal decay, retained-mode fraction, and time since
+handoff. A four-fold complete-configuration gate required mean prediction error
+at most 0.87 and maximum fold error at most 1.05 before opening the lockbox.
+
+The four fold errors were 0.976/1.022/1.016/1.020. The maximum-fold gate passed,
+but mean error was 1.008, above 0.87. This is only about a 7% improvement over
+the preceding conditioned model's mean error of 1.085, rather than the required
+20%. The workflow therefore stopped before reading or simulating any lockbox
+case. No new accuracy or runtime promotion claim is made.
+
+This result argues against adding more anchors or trajectories within the same
+local linear-regression architecture. The analytic bandwidth-12 closure remains
+the production model. Continuing the learned replacement would require a
+fundamentally different conditional-operator architecture and should preserve
+the frozen lockbox for that future attempt.
+
+Pre-lockbox outputs are under `outputs/target_conditioned_prelockbox/`.

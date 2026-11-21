@@ -1,0 +1,7 @@
+case,nodes,particles,impulse_fraction,diffusion,length,runs,seed,purpose
+lockbox_base,111,5750,0.54,0.000245,4.4,500,81000,headline interpolation case
+lockbox_impulse,111,5750,0.31,0.000245,4.4,250,81001,unseen impulse location
+lockbox_particles,111,7200,0.54,0.000245,4.4,250,81002,unseen particle count
+lockbox_diffusion,111,5750,0.54,0.000175,4.4,250,81003,unseen diffusivity
+lockbox_grid,141,5750,0.54,0.000245,4.4,250,81004,unseen spatial grid
+lockbox_domain,111,5750,0.54,0.000245,5.6,250,81005,unseen domain length

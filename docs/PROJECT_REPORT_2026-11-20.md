@@ -39,7 +39,8 @@ persistence, and batching follow-ups now localize the remaining scientific
 error to cross-configuration regression transfer.
 The first jointly physics-conditioned regression and configuration-level
 cross-validation study are also complete; they improve some errors but do not
-pass the frozen gates.
+pass the frozen gates. The final 16-anchor target-conditioned candidate failed
+its pre-lockbox CV gate, so the new unbiased lockbox remains unopened.
 
 ## Completed work
 
@@ -72,6 +73,9 @@ pass the frozen gates.
   innovation rank as the main remaining error source.
 - Added a jointly physics-conditioned local regression, whole-configuration
   linear/quadratic cross-validation, and targeted bridge-anchor design.
+- Froze a new six-case lockbox, added four bridge anchors and target-level
+  modal/time conditioning, and enforced a pre-lockbox CV gate; the candidate
+  failed and stopped before lockbox evaluation.
 - Generated five presentation figures with CSV data and supporting NPZ arrays.
 
 ## Experiments completed
@@ -97,6 +101,7 @@ wall-clock measurement and is not an ensemble trial.
 | 12. Anchor-conditioned fitted closure | Twelve separate physical anchors; three-nearest interpolation; rank-12-plus-diagonal Gaussian innovations; vectorized target-mode features | 100 training trajectories per anchor; the identical unseen 500-trial base, five 250-trial physical held-outs, and 51/101/151/201 scaling gate; seed 7 | Test whether configuration conditioning and compressed learned innovations repair the first fitted model's transfer errors while making fitted inference competitive. |
 | 13. Exact-anchor and persistent-innovation ablation | Rank 4/8/12/20 innovation factors at all 12 exact anchors; leave-one-anchor-out regressions; stable conditional residual dynamics; batched completion | All anchor residuals and five time bins; fresh 100-run ensembles at representative 51/101/201-node exact anchors; repeated frozen 500/250 and scaling gates; seed 7 | Separate innovation compression, temporal persistence, and coefficient-transfer error, then test whether conditional innovations and batching close the remaining accuracy and runtime gaps. |
 | 14. Physics-conditioned fitted closure | One joint local regression conditioned on normalized grid size, impulse fraction, and dimensionless diffusion time; linear versus quadratic configuration-level cross-validation | 12 anchors with 100 trials each; three complete-configuration folds; identical frozen 500-trial base, five 250-trial held-outs, and 51/101/151/201 scaling; seed 7 | Avoid interpolation of unstable coefficient coordinates, select conditioning complexity without trajectory leakage, and use the error map to design targeted bridge anchors. |
+| 15. Target-conditioned pre-lockbox gate | Physics-conditioned regression plus modal index, modal decay, retained fraction, and time-since-handoff features; four targeted bridge anchors | 16 anchors with 100 trials each; four complete-configuration folds; predeclared mean/max CV gates of 0.87/1.05; lockbox frozen but not opened | Test whether targeted coverage and target-level physics produce the required 20% transfer improvement before spending the new unbiased lockbox or optimizing runtime. |
 
 The original presentation suite did not include the completion-rank and
 selected-pipeline studies; both have now been completed separately.
@@ -222,27 +227,35 @@ runtime was 0.223 seconds versus 0.160 seconds for analytic-local, so neither
 promotion gate passed. The cross-validation map proposes four unique bridge
 anchors spanning 114--176 nodes and intermediate impulse/domain parameters.
 
+The 16-anchor target-conditioned successor did not pass its pre-lockbox gate.
+Its fold errors were 0.976/1.022/1.016/1.020, for a mean of 1.008. The maximum
+fold satisfied the 1.05 limit, but the mean missed the 0.87 requirement. This is
+only about a 7% improvement over the previous 1.085 mean rather than the
+predeclared 20%. The six-case lockbox remains unopened, and no runtime tuning
+or promotion benchmark was performed for this rejected candidate.
+
 ## Ordered next steps
 
-### 1. Freeze a new lockbox before adding the proposed bridge anchors
+### 1. Retain the analytic bandwidth-12 closure for the current project
 
-The existing held-outs have now informed model and anchor design, so they can
-no longer serve as an unbiased promotion test. Specify new impulse, domain,
-grid, diffusion, and particle-count cases before training the expanded model.
+The fitted line has now isolated and tested global sharing, anchor
+interpolation, low-rank innovations, persistent residuals, bridge anchors, and
+target-level physical conditioning. The local linear architecture still does
+not transfer adequately, so more anchors or trials are not justified.
 
-### 2. Add target-level physical conditioning and the four bridge anchors
+### 2. Preserve the lockbox for a genuinely different architecture
 
-The current conditioning varies only with configuration. Add normalized modal
-decay/eigenvalue and time fraction to the coefficient model, then train the
-four proposed 114--176-node bridge configurations. Keep rank 12 and 100 trials
-per anchor; the ablation gives no evidence that either should increase.
+Do not inspect `configs/fitted_closure_lockbox.csv` through model evaluation.
+If the learned-closure effort continues, first specify a nonlinear conditional
+operator, analytic-teacher distillation, or another materially different model
+and pass configuration CV before opening the lockbox.
 
-### 3. Reapply the gates, then optimize only if accuracy passes
+### 3. Finish the scientific synthesis and presentation
 
-First use configuration cross-validation and the new lockbox. If both pass,
-fuse per-step feature gathering, prediction, and Gaussian sampling to close the
-remaining roughly 0.02-second single-trajectory gap. Otherwise keep the
-analytic bandwidth-12 closure as the production implementation.
+Present the negative fitted studies as a controlled result: innovation rank is
+adequate, exact-anchor behavior is substantially better, and transfer of the
+conditional operator is the unresolved limitation. Keep the validated analytic
+local closure and its scaling results as the final recommended pipeline.
 
 # Appendix A: mathematical framework
 
@@ -634,3 +647,34 @@ some frozen errors, but fold scores remained near or above one and quadratic
 conditioning extrapolated poorly. The resulting anchor-design stage places
 new bridge configurations between the highest-error grid/domain regions and
 their nearest covered neighbors.
+
+# Appendix J: target-conditioned pre-lockbox gate
+
+The final local-linear candidate augments the configuration coordinate with
+target and transition information,
+
+```text
+q_target = [q_config,
+            k / (n_nodes - 1),
+            log(1 + lambda_k dt),
+            retained_modes / n_nodes,
+            (t - t_handoff) / (T - t_handoff)].
+```
+
+The linear basis `phi(q_target)` is interacted with the same local modal
+features used by the sparse closure. Four bridge configurations generated from
+the earlier CV error map increase the training design from 12 to 16 physical
+anchors. Each anchor contributes 100 independent multinomial trajectories.
+
+Before training changes, a six-case lockbox and all seeds were written to
+`configs/fitted_closure_lockbox.csv`. The predeclared configuration-CV gate was
+
+```text
+mean fold error <= 0.87,     maximum fold error <= 1.05.
+```
+
+The observed mean/maximum were 1.008/1.022. Since both conditions were required,
+the workflow returned after writing `prelockbox_summary.json`; it did not load
+the lockbox manifest into validation, generate lockbox trajectories, or run a
+candidate scaling benchmark. This preserves the lockbox for a materially new
+future architecture and prevents repeated adaptation to the final test set.

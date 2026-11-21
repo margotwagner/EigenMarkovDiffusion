@@ -154,6 +154,8 @@ def test_fitted_closure_study_cli_is_registered() -> None:
             "6",
             "--persistent-innovations",
             "--run-ablation",
+            "--use-bridge-anchors",
+            "--gate-before-lockbox",
         ]
     )
     assert args.command == "study-fitted-closure"
@@ -166,6 +168,10 @@ def test_fitted_closure_study_cli_is_registered() -> None:
     assert args.run_ablation
     assert args.ablation_ranks == [4, 8, 12, 20]
     assert args.exact_anchor_runs == 100
-    assert args.conditioning_degrees == [1, 2]
+    assert args.conditioning_degrees == [1]
     assert args.conditioning_folds == 3
     assert args.recommended_anchor_count == 4
+    assert args.cv_mean_threshold == 0.87
+    assert args.cv_max_threshold == 1.05
+    assert args.use_bridge_anchors
+    assert args.gate_before_lockbox

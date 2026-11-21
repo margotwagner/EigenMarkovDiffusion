@@ -54,9 +54,13 @@ def test_conditioned_model_cross_validates_and_completes(tmp_path) -> None:
         max_regression_samples_per_target=100,
         seed=20,
     )
-    initial, transition = regression.coefficients(conditioned_config(4, 2.0e-4))
-    assert initial.shape == (2, 5)
-    assert transition.shape == (2, 15)
+    initial, transition = regression.target_coefficients(
+        conditioned_config(4, 2.0e-4),
+        retained_modes=6,
+        time_fraction=0.5,
+    )
+    assert initial.shape == (5, 5)
+    assert transition.shape == (5, 15)
     innovations = AnchoredFittedClosureModel.fit(
         cases,
         bandwidth=2,
