@@ -1,6 +1,10 @@
 import numpy as np
+import pytest
 
-from eigendiffusion.baselines import multinomial_random_walk_diffusion
+from eigendiffusion.baselines import (
+    multinomial_random_walk_diffusion,
+    vectorized_multinomial_random_walk_diffusion,
+)
 from eigendiffusion.config import DiffusionConfig
 from eigendiffusion.metrics import relative_frobenius_error
 from eigendiffusion.references import multinomial_marginal_covariance
@@ -44,7 +48,16 @@ def test_empirical_cross_time_covariance_zero_for_identical_runs():
     assert np.allclose(covariance, 0.0)
 
 
-def test_multinomial_random_walk_matches_analytic_cross_time_covariance():
+@pytest.mark.parametrize(
+    "simulation",
+    [
+        multinomial_random_walk_diffusion,
+        vectorized_multinomial_random_walk_diffusion,
+    ],
+)
+def test_multinomial_random_walk_matches_analytic_cross_time_covariance(
+    simulation,
+):
     config = DiffusionConfig(
         n_particles=200,
         n_nodes=7,
@@ -55,7 +68,7 @@ def test_multinomial_random_walk_matches_analytic_cross_time_covariance():
     sequences = np.random.SeedSequence(0).spawn(1200)
     runs = np.stack(
         [
-            multinomial_random_walk_diffusion(
+            simulation(
                 config,
                 rng=np.random.default_rng(sequence),
             )

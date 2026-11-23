@@ -24,7 +24,10 @@ from typing import Literal, Sequence
 
 import numpy as np
 
-from .baselines import multinomial_random_walk_diffusion
+from .baselines import (
+    multinomial_random_walk_diffusion,
+    vectorized_multinomial_random_walk_diffusion,
+)
 from .benchmarking import (
     SELECTED_OPERATING_POINTS,
     OperatingPoint,
@@ -53,8 +56,22 @@ COMPONENT_BENCHMARK_REGIMES: tuple[ComponentBenchmarkRegime, ...] = (
     "fixed_duration",
 )
 
+StandardComparatorMethod = Literal[
+    "aggregated_multinomial",
+    "aggregated_multinomial_vectorized",
+]
 STANDARD_COMPARATOR_METHOD = "aggregated_multinomial"
+VECTORIZED_STANDARD_COMPARATOR_METHOD = "aggregated_multinomial_vectorized"
+PRIMARY_STANDARD_COMPARATOR_METHOD = VECTORIZED_STANDARD_COMPARATOR_METHOD
+STANDARD_COMPARATOR_METHODS: tuple[StandardComparatorMethod, ...] = (
+    STANDARD_COMPARATOR_METHOD,
+    VECTORIZED_STANDARD_COMPARATOR_METHOD,
+)
 STANDARD_COMPARATOR_VARIANT = "native_integer_counts"
+STANDARD_COMPARATOR_SEED_CHANNELS = {
+    STANDARD_COMPARATOR_METHOD: 3,
+    VECTORIZED_STANDARD_COMPARATOR_METHOD: 4,
+}
 
 ComponentName = Literal[
     "simulator_setup",
@@ -65,6 +82,32 @@ ComponentName = Literal[
     "physical_readout",
     "trajectory_total",
 ]
+
+
+def _run_standard_comparator(
+    method: str,
+    config: DiffusionConfig,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if method == STANDARD_COMPARATOR_METHOD:
+        return multinomial_random_walk_diffusion(config, rng=rng)
+    if method == VECTORIZED_STANDARD_COMPARATOR_METHOD:
+        return vectorized_multinomial_random_walk_diffusion(config, rng=rng)
+    raise ValueError(f"unknown standard comparator method: {method}")
+
+
+def _standard_transient_core_array_bytes(
+    method: str,
+    config: DiffusionConfig,
+) -> int:
+    output_bytes = config.n_steps * config.n_nodes * np.dtype(np.int64).itemsize
+    node_vector_bytes = config.n_nodes * np.dtype(np.int64).itemsize
+    if method == STANDARD_COMPARATOR_METHOD:
+        return output_bytes + node_vector_bytes
+    if method == VECTORIZED_STANDARD_COMPARATOR_METHOD:
+        # Movers/right integer vectors plus move-probability/right-share vectors.
+        return output_bytes + 4 * node_vector_bytes
+    raise ValueError(f"unknown standard comparator method: {method}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +139,7 @@ class ComponentTimingSample:
 class StandardTimingSample:
     """One aligned end-to-end sample from the standard simulation."""
 
+    method: str
     repeat: int
     seconds: float
     execution_position: int
@@ -107,7 +151,7 @@ class StandardTimingSample:
             "repeat": self.repeat,
             "seconds": self.seconds,
             "readout": STANDARD_COMPARATOR_VARIANT,
-            "method": STANDARD_COMPARATOR_METHOD,
+            "method": self.method,
             "execution_position": self.execution_position,
             "seed_id": self.seed_id,
         }
@@ -117,6 +161,7 @@ class StandardTimingSample:
 class StandardSimulationBenchmark:
     """Aligned exact aggregated-random-walk timing for one configuration."""
 
+    method: str
     config: DiffusionConfig
     regime: ComponentBenchmarkRegime
     trajectory_repeats: int
@@ -129,7 +174,7 @@ class StandardSimulationBenchmark:
 
     def sample_rows(self) -> list[dict[str, str | int | float]]:
         configuration: dict[str, str | int | float] = {
-            "pipeline": STANDARD_COMPARATOR_METHOD,
+            "pipeline": self.method,
             "variant": STANDARD_COMPARATOR_VARIANT,
             "regime": self.regime,
             "output_workload": "full_field_every_timestep",
@@ -156,7 +201,7 @@ class StandardSimulationBenchmark:
         transitions = self.config.n_steps - 1
         return {
             "configuration": {
-                "method": STANDARD_COMPARATOR_METHOD,
+                "method": self.method,
                 "variant": STANDARD_COMPARATOR_VARIANT,
                 "regime": self.regime,
                 "n_particles": self.config.n_particles,
@@ -221,7 +266,20 @@ class FullFieldComponentBenchmark:
     output_array_bytes: int
     output_dtype: str
     constraint_diagnostics: dict[str, dict[str, float]]
-    standard_benchmark: StandardSimulationBenchmark | None = None
+    standard_benchmarks: tuple[StandardSimulationBenchmark, ...] = ()
+
+    @property
+    def standard_benchmark(self) -> StandardSimulationBenchmark | None:
+        """Return the original loop comparator for backward compatibility."""
+
+        return next(
+            (
+                item
+                for item in self.standard_benchmarks
+                if item.method == STANDARD_COMPARATOR_METHOD
+            ),
+            None,
+        )
 
     def sample_rows(self) -> list[dict[str, str | int | float]]:
         """Return long-format timing rows with configuration columns."""
@@ -342,8 +400,19 @@ class FullFieldComponentBenchmark:
                 "output_dtype": self.output_dtype,
             },
         }
-        if self.standard_benchmark is not None:
-            report["standard_comparator"] = self.standard_benchmark.summary()
+        if self.standard_benchmarks:
+            report["standard_comparators"] = [
+                item.summary() for item in self.standard_benchmarks
+            ]
+            primary = next(
+                (
+                    item
+                    for item in self.standard_benchmarks
+                    if item.method == PRIMARY_STANDARD_COMPARATOR_METHOD
+                ),
+                self.standard_benchmarks[0],
+            )
+            report["standard_comparator"] = primary.summary()
         return report
 
 
@@ -619,206 +688,32 @@ class ComponentScalingBenchmark:
                     }
                 )
         standard_benchmarks = [
-            item.standard_benchmark
+            standard
             for item in self.benchmarks
-            if item.standard_benchmark is not None
+            for standard in item.standard_benchmarks
         ]
-        standard_slopes: dict[str, dict[str, float | None]] = {}
-        for regime in COMPONENT_BENCHMARK_REGIMES:
-            selected_standard = sorted(
-                (item for item in standard_benchmarks if item.regime == regime),
-                key=lambda item: item.config.n_nodes,
+        standard_slopes = _standard_scaling_slopes(
+            standard_benchmarks,
+            self.standard_memory_records,
+        )
+        comparisons = [
+            _configuration_comparison(
+                benchmark,
+                self.memory_records,
+                self.standard_memory_records,
             )
-            if len(selected_standard) < 2:
-                continue
-            nodes = [float(item.config.n_nodes) for item in selected_standard]
-            output_cells = [
-                float(item.config.n_nodes * item.config.n_steps)
-                for item in selected_standard
-            ]
-            reports = [item.summary() for item in selected_standard]
-            times = [float(item["timing"]["median_seconds"]) for item in reports]
-            per_transition = [
-                float(item["timing"]["median_seconds_per_transition"])
-                for item in reports
-            ]
-            output_bytes = [
-                float(item["memory"]["output_array_bytes"]) for item in reports
-            ]
-            standard_slopes[regime] = {
-                "trajectory_total_vs_nodes": _log_log_slope(nodes, times),
-                "trajectory_total_vs_output_cells": _log_log_slope(
-                    output_cells,
-                    times,
-                ),
-                "seconds_per_transition_vs_nodes": _log_log_slope(
-                    nodes,
-                    per_transition,
-                ),
-                "output_array_bytes_vs_nodes": _log_log_slope(
-                    nodes,
-                    output_bytes,
-                ),
-            }
-            regime_memory = sorted(
-                (
-                    item
-                    for item in self.standard_memory_records
-                    if item.regime == regime
-                ),
-                key=lambda item: item.n_nodes,
-            )
-            if len(regime_memory) >= 2:
-                memory_nodes = [float(item.n_nodes) for item in regime_memory]
-                standard_slopes[regime]["isolated_peak_increment_vs_nodes"] = (
-                    _log_log_slope(
-                        memory_nodes,
-                        [
-                            float(item.overall_peak_incremental_bytes)
-                            for item in regime_memory
-                        ],
-                    )
-                )
-                standard_slopes[regime]["resident_array_bytes_vs_nodes"] = (
-                    _log_log_slope(
-                        memory_nodes,
-                        [float(item.resident_array_bytes) for item in regime_memory],
-                    )
-                )
-
-        comparisons: list[dict[str, object]] = []
-        for benchmark in self.benchmarks:
-            standard = benchmark.standard_benchmark
-            if standard is None:
-                continue
-            modal_report = benchmark.summary()
-            standard_report = standard.summary()
-            standard_seconds = float(
-                standard_report["timing"]["median_seconds"]
-            )
-            setup_seconds = float(
-                modal_report["components"]["setup_total"]["median_seconds"]
-            )
-            standard_memory = next(
-                (
-                    item
-                    for item in self.standard_memory_records
-                    if item.regime == benchmark.regime
-                    and item.n_nodes == benchmark.config.n_nodes
-                ),
-                None,
-            )
-            readout_comparisons: dict[str, dict[str, object]] = {}
-            for readout in benchmark.readouts:
-                modal_seconds = float(
-                    modal_report["readouts"][readout][
-                        "measured_end_to_end_seconds"
-                    ]
-                )
-                modal_by_repeat = {
-                    sample.repeat: sample.seconds
-                    for sample in benchmark.samples
-                    if sample.component == "trajectory_total"
-                    and sample.readout == readout
-                }
-                standard_by_repeat = {
-                    sample.repeat: sample.seconds for sample in standard.samples
-                }
-                paired_ratios = [
-                    modal_by_repeat[repeat] / standard_by_repeat[repeat]
-                    for repeat in sorted(modal_by_repeat.keys() & standard_by_repeat.keys())
-                ]
-                if modal_seconds < standard_seconds:
-                    break_even = max(
-                        1,
-                        int(
-                            np.ceil(
-                                setup_seconds
-                                / (standard_seconds - modal_seconds)
-                            )
-                        ),
-                    )
-                else:
-                    break_even = None
-                modal_memory = next(
-                    (
-                        item
-                        for item in self.memory_records
-                        if item.regime == benchmark.regime
-                        and item.n_nodes == benchmark.config.n_nodes
-                        and item.readout == readout
-                    ),
-                    None,
-                )
-                memory_comparison: dict[str, float | None] | None = None
-                if modal_memory is not None and standard_memory is not None:
-                    memory_comparison = {
-                        "overall_peak_increment_ratio_modal_over_standard": (
-                            _safe_ratio(
-                                modal_memory.overall_peak_incremental_bytes,
-                                standard_memory.overall_peak_incremental_bytes,
-                            )
-                        ),
-                        "logical_peak_array_ratio_modal_over_standard": _safe_ratio(
-                            modal_memory.resident_array_bytes,
-                            standard_memory.transient_core_array_bytes,
-                        ),
-                        "returned_result_array_ratio_modal_over_standard": (
-                            _safe_ratio(
-                                modal_memory.returned_result_array_bytes,
-                                standard_memory.returned_result_array_bytes,
-                            )
-                        ),
-                        "output_array_ratio_modal_over_standard": _safe_ratio(
-                            modal_memory.output_array_bytes,
-                            standard_memory.output_array_bytes,
-                        ),
-                    }
-                readout_comparisons[readout] = {
-                    "steady_runtime_ratio_modal_over_standard": _safe_ratio(
-                        modal_seconds,
-                        standard_seconds,
-                    ),
-                    "median_paired_repeat_ratio_modal_over_standard": (
-                        float(np.median(paired_ratios)) if paired_ratios else None
-                    ),
-                    "amortized_runtime_ratio_modal_over_standard": {
-                        str(count): _safe_ratio(
-                            modal_seconds + setup_seconds / count,
-                            standard_seconds,
-                        )
-                        for count in (1, 10, 100, 1_000)
-                    },
-                    "break_even_trajectories": break_even,
-                    "memory": memory_comparison,
-                }
-            comparisons.append(
-                {
-                    "regime": benchmark.regime,
-                    "n_nodes": benchmark.config.n_nodes,
-                    "n_steps": benchmark.config.n_steps,
-                    "dt": benchmark.config.dt,
-                    "total_time": float(benchmark.config.times[-1]),
-                    "ratio_direction": (
-                        "modal_over_standard; values above one mean modal is slower "
-                        "or uses more memory"
-                    ),
-                    "standard_median_seconds": standard_seconds,
-                    "modal_setup_median_seconds": setup_seconds,
-                    "readouts": readout_comparisons,
-                }
-            )
+            for benchmark in self.benchmarks
+            if benchmark.standard_benchmarks
+        ]
 
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "operating_point": self.operating_point,
             "study_contract": {
                 "output_workload": "full_field_every_timestep",
                 "common_time_grid": True,
-                "standard_comparator": (
-                    "exact aggregated multinomial node-count process with native "
-                    "integer full-field output"
-                ),
+                "standard_comparators": list(STANDARD_COMPARATOR_METHODS),
+                "primary_standard_comparator": PRIMARY_STANDARD_COMPARATOR_METHOD,
                 "standard_setup_applicable": False,
                 "operating_point_parameters_scale_with_nodes": True,
                 "fixed_steps": (
@@ -875,6 +770,225 @@ def _safe_ratio(numerator: float | int, denominator: float | int) -> float | Non
     return float(numerator / denominator)
 
 
+def _standard_scaling_slopes(
+    benchmarks: Sequence[StandardSimulationBenchmark],
+    memory_records: Sequence[StandardSimulationMemoryRecord],
+) -> dict[str, dict[str, dict[str, float | None]]]:
+    slopes: dict[str, dict[str, dict[str, float | None]]] = {}
+    for method in STANDARD_COMPARATOR_METHODS:
+        method_slopes: dict[str, dict[str, float | None]] = {}
+        for regime in COMPONENT_BENCHMARK_REGIMES:
+            selected = sorted(
+                (
+                    item
+                    for item in benchmarks
+                    if item.method == method and item.regime == regime
+                ),
+                key=lambda item: item.config.n_nodes,
+            )
+            if len(selected) < 2:
+                continue
+            nodes = [float(item.config.n_nodes) for item in selected]
+            output_cells = [
+                float(item.config.n_nodes * item.config.n_steps)
+                for item in selected
+            ]
+            reports = [item.summary() for item in selected]
+            times = [float(item["timing"]["median_seconds"]) for item in reports]
+            per_transition = [
+                float(item["timing"]["median_seconds_per_transition"])
+                for item in reports
+            ]
+            output_bytes = [
+                float(item["memory"]["output_array_bytes"]) for item in reports
+            ]
+            regime_slopes: dict[str, float | None] = {
+                "trajectory_total_vs_nodes": _log_log_slope(nodes, times),
+                "trajectory_total_vs_output_cells": _log_log_slope(
+                    output_cells,
+                    times,
+                ),
+                "seconds_per_transition_vs_nodes": _log_log_slope(
+                    nodes,
+                    per_transition,
+                ),
+                "output_array_bytes_vs_nodes": _log_log_slope(
+                    nodes,
+                    output_bytes,
+                ),
+            }
+            selected_memory = sorted(
+                (
+                    item
+                    for item in memory_records
+                    if item.method == method and item.regime == regime
+                ),
+                key=lambda item: item.n_nodes,
+            )
+            if len(selected_memory) >= 2:
+                memory_nodes = [float(item.n_nodes) for item in selected_memory]
+                regime_slopes["isolated_peak_increment_vs_nodes"] = (
+                    _log_log_slope(
+                        memory_nodes,
+                        [
+                            float(item.overall_peak_incremental_bytes)
+                            for item in selected_memory
+                        ],
+                    )
+                )
+                regime_slopes["resident_array_bytes_vs_nodes"] = _log_log_slope(
+                    memory_nodes,
+                    [float(item.resident_array_bytes) for item in selected_memory],
+                )
+            method_slopes[regime] = regime_slopes
+        if method_slopes:
+            slopes[method] = method_slopes
+    return slopes
+
+
+def _configuration_comparison(
+    benchmark: FullFieldComponentBenchmark,
+    modal_memory_records: Sequence[ComponentMemoryRecord],
+    standard_memory_records: Sequence[StandardSimulationMemoryRecord],
+) -> dict[str, object]:
+    modal_report = benchmark.summary()
+    setup_seconds = float(
+        modal_report["components"]["setup_total"]["median_seconds"]
+    )
+    standard_comparisons: dict[str, dict[str, object]] = {}
+    standard_seconds_by_method: dict[str, float] = {}
+
+    for standard in benchmark.standard_benchmarks:
+        standard_seconds = float(standard.summary()["timing"]["median_seconds"])
+        standard_seconds_by_method[standard.method] = standard_seconds
+        standard_memory = next(
+            (
+                item
+                for item in standard_memory_records
+                if item.regime == benchmark.regime
+                and item.n_nodes == benchmark.config.n_nodes
+                and item.method == standard.method
+            ),
+            None,
+        )
+        readout_comparisons: dict[str, dict[str, object]] = {}
+        for readout in benchmark.readouts:
+            modal_seconds = float(
+                modal_report["readouts"][readout]["measured_end_to_end_seconds"]
+            )
+            modal_by_repeat = {
+                sample.repeat: sample.seconds
+                for sample in benchmark.samples
+                if sample.component == "trajectory_total"
+                and sample.readout == readout
+            }
+            standard_by_repeat = {
+                sample.repeat: sample.seconds for sample in standard.samples
+            }
+            paired_ratios = [
+                modal_by_repeat[repeat] / standard_by_repeat[repeat]
+                for repeat in sorted(modal_by_repeat.keys() & standard_by_repeat.keys())
+            ]
+            break_even = None
+            if modal_seconds < standard_seconds:
+                break_even = max(
+                    1,
+                    int(
+                        np.ceil(
+                            setup_seconds / (standard_seconds - modal_seconds)
+                        )
+                    ),
+                )
+            modal_memory = next(
+                (
+                    item
+                    for item in modal_memory_records
+                    if item.regime == benchmark.regime
+                    and item.n_nodes == benchmark.config.n_nodes
+                    and item.readout == readout
+                ),
+                None,
+            )
+            memory_comparison: dict[str, float | None] | None = None
+            if modal_memory is not None and standard_memory is not None:
+                memory_comparison = {
+                    "overall_peak_increment_ratio_modal_over_standard": (
+                        _safe_ratio(
+                            modal_memory.overall_peak_incremental_bytes,
+                            standard_memory.overall_peak_incremental_bytes,
+                        )
+                    ),
+                    "logical_peak_array_ratio_modal_over_standard": _safe_ratio(
+                        modal_memory.resident_array_bytes,
+                        standard_memory.transient_core_array_bytes,
+                    ),
+                    "returned_result_array_ratio_modal_over_standard": _safe_ratio(
+                        modal_memory.returned_result_array_bytes,
+                        standard_memory.returned_result_array_bytes,
+                    ),
+                    "output_array_ratio_modal_over_standard": _safe_ratio(
+                        modal_memory.output_array_bytes,
+                        standard_memory.output_array_bytes,
+                    ),
+                }
+            readout_comparisons[readout] = {
+                "steady_runtime_ratio_modal_over_standard": _safe_ratio(
+                    modal_seconds,
+                    standard_seconds,
+                ),
+                "median_paired_repeat_ratio_modal_over_standard": (
+                    float(np.median(paired_ratios)) if paired_ratios else None
+                ),
+                "amortized_runtime_ratio_modal_over_standard": {
+                    str(count): _safe_ratio(
+                        modal_seconds + setup_seconds / count,
+                        standard_seconds,
+                    )
+                    for count in (1, 10, 100, 1_000)
+                },
+                "break_even_trajectories": break_even,
+                "memory": memory_comparison,
+            }
+        standard_comparisons[standard.method] = {
+            "standard_median_seconds": standard_seconds,
+            "readouts": readout_comparisons,
+        }
+
+    primary_method = (
+        PRIMARY_STANDARD_COMPARATOR_METHOD
+        if PRIMARY_STANDARD_COMPARATOR_METHOD in standard_comparisons
+        else next(iter(standard_comparisons))
+    )
+    primary = standard_comparisons[primary_method]
+    loop_seconds = standard_seconds_by_method.get(STANDARD_COMPARATOR_METHOD)
+    vectorized_seconds = standard_seconds_by_method.get(
+        VECTORIZED_STANDARD_COMPARATOR_METHOD
+    )
+    implementation_speedup = None
+    if loop_seconds is not None and vectorized_seconds is not None:
+        implementation_speedup = _safe_ratio(loop_seconds, vectorized_seconds)
+    return {
+        "regime": benchmark.regime,
+        "n_nodes": benchmark.config.n_nodes,
+        "n_steps": benchmark.config.n_steps,
+        "dt": benchmark.config.dt,
+        "total_time": float(benchmark.config.times[-1]),
+        "ratio_direction": (
+            "modal_over_standard; values above one mean modal is slower or uses "
+            "more memory"
+        ),
+        "primary_standard_method": primary_method,
+        "standard_implementation_speedup_loop_over_vectorized": (
+            implementation_speedup
+        ),
+        "modal_setup_median_seconds": setup_seconds,
+        "standards": standard_comparisons,
+        # Compatibility aliases point to the faster production comparator.
+        "standard_median_seconds": primary["standard_median_seconds"],
+        "readouts": primary["readouts"],
+    }
+
+
 def _balanced_execution_orders(
     tasks: Sequence[tuple[str, str]],
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
@@ -896,6 +1010,22 @@ def _balanced_execution_orders(
             (2, 1, 0),
             (1, 2, 0),
             (0, 2, 1),
+        )
+        return tuple(tuple(values[index] for index in order) for order in index_orders)
+    if len(values) == 4:
+        # Five orders paired with their reverses balance every pair over the
+        # default ten repeats while spreading absolute execution positions.
+        base_orders = (
+            (0, 1, 2, 3),
+            (1, 2, 3, 0),
+            (2, 3, 0, 1),
+            (3, 0, 1, 2),
+            (0, 2, 3, 1),
+        )
+        index_orders = tuple(
+            order
+            for base in base_orders
+            for order in (base, tuple(reversed(base)))
         )
         return tuple(tuple(values[index] for index in order) for order in index_orders)
     return tuple(permutations(values))
@@ -1148,18 +1278,21 @@ def benchmark_full_field_components(
                 seed=(seed, 0, warmup),
             )
         if include_standard_comparator:
-            standard_warmup = multinomial_random_walk_diffusion(
-                config,
-                rng=np.random.default_rng(
-                    np.random.SeedSequence([seed, 0, 3, warmup])
-                ),
-            )
-            validate_full_field_output(
-                standard_warmup,
-                config,
-                require_integer=True,
-            )
-            del standard_warmup
+            for method in STANDARD_COMPARATOR_METHODS:
+                channel = STANDARD_COMPARATOR_SEED_CHANNELS[method]
+                standard_warmup = _run_standard_comparator(
+                    method,
+                    config,
+                    np.random.default_rng(
+                        np.random.SeedSequence([seed, 0, channel, warmup])
+                    ),
+                )
+                validate_full_field_output(
+                    standard_warmup,
+                    config,
+                    require_integer=True,
+                )
+                del standard_warmup
 
     setup_array_bytes = deep_numpy_nbytes(pipeline)
     resident_array_bytes = setup_array_bytes
@@ -1168,10 +1301,18 @@ def benchmark_full_field_components(
     diagnostic_accumulator: dict[str, list[dict[str, float]]] = {
         readout: [] for readout in selected_readouts
     }
-    standard_samples: list[StandardTimingSample] = []
-    standard_diagnostics: list[dict[str, float]] = []
-    standard_output_array_bytes = 0
-    standard_output_dtype = ""
+    standard_samples: dict[str, list[StandardTimingSample]] = {
+        method: [] for method in STANDARD_COMPARATOR_METHODS
+    }
+    standard_diagnostics: dict[str, list[dict[str, float]]] = {
+        method: [] for method in STANDARD_COMPARATOR_METHODS
+    }
+    standard_output_array_bytes = {
+        method: 0 for method in STANDARD_COMPARATOR_METHODS
+    }
+    standard_output_dtype = {
+        method: "" for method in STANDARD_COMPARATOR_METHODS
+    }
 
     garbage_collection_enabled = gc.isenabled()
     if garbage_collection_enabled:
@@ -1248,18 +1389,23 @@ def benchmark_full_field_components(
                 ("completed_modal", readout) for readout in selected_readouts
             ]
             if include_standard_comparator:
-                total_tasks.append(
-                    (STANDARD_COMPARATOR_METHOD, STANDARD_COMPARATOR_VARIANT)
+                total_tasks.extend(
+                    (method, STANDARD_COMPARATOR_VARIANT)
+                    for method in STANDARD_COMPARATOR_METHODS
                 )
             task_orders = _balanced_execution_orders(total_tasks)
             total_tasks = list(task_orders[repeat % len(task_orders)])
             for execution_position, (method, variant) in enumerate(total_tasks):
-                if method == STANDARD_COMPARATOR_METHOD:
-                    standard_sequence = np.random.SeedSequence([seed, 3, repeat])
+                if method in STANDARD_COMPARATOR_METHODS:
+                    channel = STANDARD_COMPARATOR_SEED_CHANNELS[method]
+                    standard_sequence = np.random.SeedSequence(
+                        [seed, channel, repeat]
+                    )
                     start = perf_counter()
-                    standard_counts = multinomial_random_walk_diffusion(
+                    standard_counts = _run_standard_comparator(
+                        method,
                         config,
-                        rng=np.random.default_rng(standard_sequence),
+                        np.random.default_rng(standard_sequence),
                     )
                     total_seconds = perf_counter() - start
                     validate_full_field_output(
@@ -1267,25 +1413,26 @@ def benchmark_full_field_components(
                         config,
                         require_integer=True,
                     )
-                    standard_samples.append(
+                    standard_samples[method].append(
                         StandardTimingSample(
+                            method=method,
                             repeat=repeat,
                             seconds=total_seconds,
                             execution_position=execution_position,
-                            seed_id=f"{seed}:3:{repeat}",
+                            seed_id=f"{seed}:{channel}:{repeat}",
                         )
                     )
-                    standard_diagnostics.append(
+                    standard_diagnostics[method].append(
                         readout_constraint_diagnostics(
                             standard_counts,
                             config.n_particles,
                         )
                     )
-                    standard_output_array_bytes = max(
-                        standard_output_array_bytes,
+                    standard_output_array_bytes[method] = max(
+                        standard_output_array_bytes[method],
                         standard_counts.nbytes,
                     )
-                    standard_output_dtype = str(standard_counts.dtype)
+                    standard_output_dtype[method] = str(standard_counts.dtype)
                     del standard_counts
                     continue
 
@@ -1331,22 +1478,27 @@ def benchmark_full_field_components(
             for key in diagnostics[0]
         }
 
-    standard_benchmark: StandardSimulationBenchmark | None = None
+    standard_benchmarks: tuple[StandardSimulationBenchmark, ...] = ()
     if include_standard_comparator:
-        standard_constraints = {
-            key: float(max(item[key] for item in standard_diagnostics))
-            for key in standard_diagnostics[0]
-        }
-        standard_benchmark = StandardSimulationBenchmark(
-            config=config,
-            regime=regime,
-            trajectory_repeats=trajectory_repeats,
-            warmup_runs=warmup_runs,
-            seed=seed,
-            samples=tuple(standard_samples),
-            output_array_bytes=standard_output_array_bytes,
-            output_dtype=standard_output_dtype,
-            constraint_diagnostics=standard_constraints,
+        standard_benchmarks = tuple(
+            StandardSimulationBenchmark(
+                method=method,
+                config=config,
+                regime=regime,
+                trajectory_repeats=trajectory_repeats,
+                warmup_runs=warmup_runs,
+                seed=seed,
+                samples=tuple(standard_samples[method]),
+                output_array_bytes=standard_output_array_bytes[method],
+                output_dtype=standard_output_dtype[method],
+                constraint_diagnostics={
+                    key: float(
+                        max(item[key] for item in standard_diagnostics[method])
+                    )
+                    for key in standard_diagnostics[method][0]
+                },
+            )
+            for method in STANDARD_COMPARATOR_METHODS
         )
 
     return FullFieldComponentBenchmark(
@@ -1367,7 +1519,7 @@ def benchmark_full_field_components(
         output_array_bytes=output_array_bytes,
         output_dtype=output_dtype,
         constraint_diagnostics=constraints,
-        standard_benchmark=standard_benchmark,
+        standard_benchmarks=standard_benchmarks,
     )
 
 
@@ -1651,6 +1803,7 @@ def measure_standard_comparator_memory(
     regime: ComponentBenchmarkRegime,
     operating_point: str,
     seed: int,
+    method: StandardComparatorMethod = STANDARD_COMPARATOR_METHOD,
     sampler_interval_ms: float = 1.0,
     worker_timeout_seconds: float = 300.0,
 ) -> StandardSimulationMemoryRecord:
@@ -1660,8 +1813,10 @@ def measure_standard_comparator_memory(
         raise ValueError("sampler_interval_ms must be positive")
     if worker_timeout_seconds <= 0.0:
         raise ValueError("worker_timeout_seconds must be positive")
+    if method not in STANDARD_COMPARATOR_METHODS:
+        raise ValueError(f"unknown standard comparator method: {method}")
     spec: dict[str, object] = {
-        "method": STANDARD_COMPARATOR_METHOD,
+        "method": method,
         "config": {
             "n_particles": config.n_particles,
             "n_nodes": config.n_nodes,
@@ -1684,7 +1839,7 @@ def measure_standard_comparator_memory(
     return StandardSimulationMemoryRecord(
         regime=regime,
         operating_point=operating_point,
-        method=STANDARD_COMPARATOR_METHOD,
+        method=method,
         variant=STANDARD_COMPARATOR_VARIANT,
         n_particles=config.n_particles,
         n_nodes=config.n_nodes,
@@ -1710,6 +1865,8 @@ def measure_standard_comparator_memory(
         trajectory_phase_samples=phase_samples["trajectory"],
         sampler_interval_ms=sampler_interval_ms,
     )
+
+
 def benchmark_component_scaling(
     *,
     node_counts: Sequence[int] = (51, 101, 151, 201),
@@ -1805,15 +1962,21 @@ def benchmark_component_scaling(
                         )
                     )
                 if include_standard_comparator:
-                    standard_memories.append(
-                        measure_standard_comparator_memory(
-                            config,
-                            regime=regime,
-                            operating_point=operating_point,
-                            seed=configuration_seed + 10_000,
-                            sampler_interval_ms=memory_sampler_interval_ms,
+                    for method in STANDARD_COMPARATOR_METHODS:
+                        standard_memories.append(
+                            measure_standard_comparator_memory(
+                                config,
+                                regime=regime,
+                                operating_point=operating_point,
+                                method=method,
+                                seed=(
+                                    configuration_seed
+                                    + 10_000
+                                    + STANDARD_COMPARATOR_SEED_CHANNELS[method]
+                                ),
+                                sampler_interval_ms=memory_sampler_interval_ms,
+                            )
                         )
-                    )
     return ComponentScalingBenchmark(
         operating_point=operating_point,
         benchmarks=tuple(benchmarks),
@@ -1864,8 +2027,8 @@ def write_component_scaling_csv(
     rows: list[dict[str, str | int | float]] = []
     for benchmark in scaling.benchmarks:
         rows.extend(benchmark.sample_rows())
-        if benchmark.standard_benchmark is not None:
-            rows.extend(benchmark.standard_benchmark.sample_rows())
+        for standard in benchmark.standard_benchmarks:
+            rows.extend(standard.sample_rows())
     fieldnames = list(dict.fromkeys(key for row in rows for key in row))
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)

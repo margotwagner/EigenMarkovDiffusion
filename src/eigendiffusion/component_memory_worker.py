@@ -9,11 +9,12 @@ import sys
 
 import numpy as np
 
-from .baselines import multinomial_random_walk_diffusion
 from .benchmarking import deep_numpy_nbytes
 from .component_benchmark import (
-    STANDARD_COMPARATOR_METHOD,
+    STANDARD_COMPARATOR_METHODS,
     _apply_readout,
+    _run_standard_comparator,
+    _standard_transient_core_array_bytes,
     build_full_field_component_pipeline,
     validate_full_field_output,
 )
@@ -49,7 +50,7 @@ def run_worker(spec: dict[str, object]) -> None:
 
     _emit("setup_start")
     _wait_for_parent()
-    if method == STANDARD_COMPARATOR_METHOD:
+    if method in STANDARD_COMPARATOR_METHODS:
         pipeline = None
         setup_array_bytes = 0
         handoff_time = None
@@ -73,21 +74,25 @@ def run_worker(spec: dict[str, object]) -> None:
         hwm_bytes=hwm,
         handoff_time=handoff_time,
         setup_array_bytes=setup_array_bytes,
-        setup_applicable=method != STANDARD_COMPARATOR_METHOD,
+        setup_applicable=method not in STANDARD_COMPARATOR_METHODS,
     )
     _wait_for_parent()
 
     _emit("trajectory_start")
     _wait_for_parent()
-    if method == STANDARD_COMPARATOR_METHOD:
-        counts = multinomial_random_walk_diffusion(
+    if method in STANDARD_COMPARATOR_METHODS:
+        counts = _run_standard_comparator(
+            method,
             config,
-            rng=np.random.default_rng(int(spec["seed"])),
+            np.random.default_rng(int(spec["seed"])),
         )
         resident_array_bytes = counts.nbytes
         output_array_bytes = counts.nbytes
         returned_result_array_bytes = counts.nbytes
-        transient_core_array_bytes = counts.nbytes + config.n_nodes * 8
+        transient_core_array_bytes = _standard_transient_core_array_bytes(
+            method,
+            config,
+        )
         output_dtype = str(counts.dtype)
     else:
         if pipeline is None:  # pragma: no cover - guarded by method branch
@@ -127,7 +132,7 @@ def run_worker(spec: dict[str, object]) -> None:
         counts,
         config,
         require_integer=(
-            method == STANDARD_COMPARATOR_METHOD
+            method in STANDARD_COMPARATOR_METHODS
             or str(spec["readout"]) == "delta_sigma_temporal"
         ),
     )

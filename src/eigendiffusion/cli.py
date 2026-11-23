@@ -3436,8 +3436,9 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Include the exact aggregated multinomial random walk on the same "
-            "time grids and full-field output contract."
+            "Include both the loop and vectorized exact aggregated multinomial "
+            "random walks on the same time grids and full-field output "
+            "contract; the vectorized implementation is primary."
         ),
     )
     component_scaling.add_argument(

@@ -1,6 +1,6 @@
 """Deterministic and stochastic diffusion baselines.
 
-Two random-walk implementations are provided deliberately:
+Three random-walk implementations are provided deliberately:
 
 ``naive_random_walk_diffusion``
     Mirrors the original research implementation by simulating and storing the
@@ -11,6 +11,10 @@ Two random-walk implementations are provided deliberately:
     Samples the same independent particle transitions jointly at each node.
     It produces the same node-count process in distribution without retaining
     particle identities or trajectories.
+
+``vectorized_multinomial_random_walk_diffusion``
+    Samples the identical node-level multinomial transitions through two
+    conditional binomial draws applied to every source node at once.
 """
 
 from __future__ import annotations
@@ -169,6 +173,50 @@ def multinomial_random_walk_diffusion(
                 updated[node_index + 1] += right
 
         counts[time_index + 1] = updated
+        # Avoid overlapping the previous temporary with the next allocation.
+        del updated
+
+    return counts
+
+
+def vectorized_multinomial_random_walk_diffusion(
+    config: DiffusionConfig,
+    rng: np.random.Generator | None = None,
+) -> IntArray:
+    """Simulate the exact aggregated walk without a Python loop over nodes.
+
+    For each source node, first sample the total number moving as
+    ``Binomial(n, p_left + p_right)``. Conditional on that result, sample the
+    number moving right with probability
+    ``p_right / (p_left + p_right)``. The resulting left/stay/right counts have
+    exactly the same multinomial distribution as
+    :func:`multinomial_random_walk_diffusion`; only the random-number mapping
+    from a seed to an individual trajectory differs.
+    """
+
+    generator = np.random.default_rng() if rng is None else rng
+    counts = np.zeros((config.n_steps, config.n_nodes), dtype=np.int64)
+    counts[0, config.impulse_index] = config.n_particles
+
+    p = config.jump_probability
+    move_probabilities = np.full(config.n_nodes, 2.0 * p, dtype=float)
+    move_probabilities[[0, -1]] = p
+    right_shares = np.full(config.n_nodes, 0.5, dtype=float)
+    right_shares[0] = 1.0
+    right_shares[-1] = 0.0
+
+    for time_index in range(config.n_steps - 1):
+        current = counts[time_index]
+        movers = generator.binomial(current, move_probabilities)
+        right = generator.binomial(movers, right_shares)
+        movers -= right  # Reuse the movers array as the left-mover array.
+
+        updated = counts[time_index + 1]
+        np.subtract(current, movers, out=updated)
+        updated -= right
+        updated[:-1] += movers[1:]
+        updated[1:] += right[:-1]
+        del movers, right
 
     return counts
 

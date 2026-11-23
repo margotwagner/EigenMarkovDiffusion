@@ -6,6 +6,10 @@ import pytest
 
 from eigendiffusion.cli import build_parser
 from eigendiffusion.component_benchmark import (
+    PRIMARY_STANDARD_COMPARATOR_METHOD,
+    STANDARD_COMPARATOR_METHOD,
+    STANDARD_COMPARATOR_METHODS,
+    VECTORIZED_STANDARD_COMPARATOR_METHOD,
     benchmark_component_scaling,
     benchmark_full_field_components,
     build_full_field_component_pipeline,
@@ -201,17 +205,21 @@ def test_component_scaling_runs_two_node_counts_and_reports_slopes(tmp_path) -> 
 
     summary = scaling.summary()
     assert summary["operating_point"] == "accuracy_first"
-    assert summary["schema_version"] == 2
+    assert summary["schema_version"] == 3
     assert len(summary["configurations"]) == 4
     assert summary["memory_records"] == []
-    assert len(summary["standard_comparators"]) == 4
+    assert len(summary["standard_comparators"]) == 8
     assert summary["standard_memory_records"] == []
     assert len(summary["comparisons"]) == 4
     assert set(summary["scaling_slopes"]) == {"fixed_steps", "fixed_duration"}
-    assert set(summary["standard_scaling_slopes"]) == {
-        "fixed_steps",
-        "fixed_duration",
-    }
+    assert set(summary["standard_scaling_slopes"]) == set(
+        STANDARD_COMPARATOR_METHODS
+    )
+    for method in STANDARD_COMPARATOR_METHODS:
+        assert set(summary["standard_scaling_slopes"][method]) == {
+            "fixed_steps",
+            "fixed_duration",
+        }
     for regime in ("fixed_steps", "fixed_duration"):
         slopes = summary["scaling_slopes"][regime]
         assert "setup_total" in slopes
@@ -225,6 +233,10 @@ def test_component_scaling_runs_two_node_counts_and_reports_slopes(tmp_path) -> 
         assert standard["constraints"]["noninteger_entry_fraction"] == 0.0
         assert standard["constraints"]["maximum_instantaneous_mass_error"] == 0.0
     for comparison in summary["comparisons"]:
+        assert comparison["primary_standard_method"] == (
+            PRIMARY_STANDARD_COMPARATOR_METHOD
+        )
+        assert set(comparison["standards"]) == set(STANDARD_COMPARATOR_METHODS)
         for readout in ("simplex_bank",):
             readout_comparison = comparison["readouts"][readout]
             ratio = readout_comparison[
@@ -263,6 +275,7 @@ def test_component_scaling_runs_two_node_counts_and_reports_slopes(tmp_path) -> 
     assert {row["pipeline"] for row in sample_rows} == {
         "completed_modal",
         "aggregated_multinomial",
+        "aggregated_multinomial_vectorized",
     }
     assert memory_path.read_text(encoding="utf-8") == ""
 
@@ -374,14 +387,24 @@ def test_standard_comparator_is_interleaved_and_satisfies_native_contract() -> N
         include_standard_comparator=True,
     )
 
-    standard = benchmark.standard_benchmark
-    assert standard is not None
-    assert len(standard.samples) == 10
-    assert {sample.execution_position for sample in standard.samples} == {0, 1, 2}
-    assert standard.output_array_bytes == 5 * 7 * np.dtype(np.int64).itemsize
-    assert standard.output_dtype == "int64"
-    assert standard.constraint_diagnostics["noninteger_entry_fraction"] == 0.0
-    assert standard.constraint_diagnostics["maximum_instantaneous_mass_error"] == 0.0
+    assert {item.method for item in benchmark.standard_benchmarks} == set(
+        STANDARD_COMPARATOR_METHODS
+    )
+    for standard in benchmark.standard_benchmarks:
+        assert len(standard.samples) == 10
+        assert {sample.execution_position for sample in standard.samples} == {
+            0,
+            1,
+            2,
+            3,
+        }
+        assert standard.output_array_bytes == 5 * 7 * np.dtype(np.int64).itemsize
+        assert standard.output_dtype == "int64"
+        assert standard.constraint_diagnostics["noninteger_entry_fraction"] == 0.0
+        assert (
+            standard.constraint_diagnostics["maximum_instantaneous_mass_error"]
+            == 0.0
+        )
 
     modal_positions = {
         sample.repeat: sample.execution_position
@@ -390,15 +413,16 @@ def test_standard_comparator_is_interleaved_and_satisfies_native_contract() -> N
         and sample.readout == "simplex_bank"
     }
     assert set(modal_positions) == set(range(10))
-    assert set(modal_positions.values()) == {0, 1, 2}
+    assert set(modal_positions.values()) == {0, 1, 2, 3}
 
     orders: dict[int, list[tuple[int, str]]] = {
         repeat: [] for repeat in range(10)
     }
-    for sample in standard.samples:
-        orders[sample.repeat].append(
-            (sample.execution_position, "aggregated_multinomial")
-        )
+    for standard in benchmark.standard_benchmarks:
+        for sample in standard.samples:
+            orders[sample.repeat].append(
+                (sample.execution_position, standard.method)
+            )
     for sample in benchmark.samples:
         if sample.component == "trajectory_total":
             orders[sample.repeat].append((sample.execution_position, sample.readout))
@@ -406,32 +430,53 @@ def test_standard_comparator_is_interleaved_and_satisfies_native_contract() -> N
         repeat: [name for _, name in sorted(values)]
         for repeat, values in orders.items()
     }
-    for readout in ("simplex_bank", "delta_sigma_temporal"):
-        standard_precedes = sum(
-            names.index("aggregated_multinomial") < names.index(readout)
-            for names in ordered_names.values()
-        )
-        assert standard_precedes == 5
+    task_names = (
+        "simplex_bank",
+        "delta_sigma_temporal",
+        *STANDARD_COMPARATOR_METHODS,
+    )
+    for first in task_names:
+        for second in task_names:
+            if first == second:
+                continue
+            first_precedes = sum(
+                names.index(first) < names.index(second)
+                for names in ordered_names.values()
+            )
+            assert first_precedes == 5
 
 
-def test_isolated_standard_comparator_memory_worker() -> None:
+@pytest.mark.parametrize(
+    ("method", "workspace_vectors"),
+    [
+        (STANDARD_COMPARATOR_METHOD, 1),
+        (VECTORIZED_STANDARD_COMPARATOR_METHOD, 4),
+    ],
+)
+def test_isolated_standard_comparator_memory_worker(
+    method: str,
+    workspace_vectors: int,
+) -> None:
     config = _tiny_config()
     record = measure_standard_comparator_memory(
         config,
         regime="fixed_steps",
         operating_point="accuracy_first",
         seed=23,
+        method=method,
     )
 
     expected_bytes = 5 * 7 * np.dtype(np.int64).itemsize
-    assert record.method == "aggregated_multinomial"
+    assert record.method == method
     assert record.variant == "native_integer_counts"
     assert record.setup_applicable is False
     assert record.setup_array_bytes == 0
     assert record.resident_array_bytes == expected_bytes
     assert record.output_array_bytes == expected_bytes
     assert record.returned_result_array_bytes == expected_bytes
-    assert record.transient_core_array_bytes == expected_bytes + 7 * 8
+    assert record.transient_core_array_bytes == (
+        expected_bytes + workspace_vectors * 7 * 8
+    )
     assert record.output_dtype == "int64"
     assert record.process_peak_after_setup_rss_bytes >= record.baseline_peak_rss_bytes
     assert (

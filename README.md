@@ -153,12 +153,14 @@ fixed, so finer grids may require more stable updates. Timing samples and
 fresh-process RSS measurements are written separately to
 `scaling_samples.csv` and `scaling_memory.csv`; `scaling_summary.json` combines
 their scaling slopes without adding memory-sampling overhead to timed runs.
-By default, the study also interleaves the exact aggregated multinomial random
-walk on every configuration. It natively returns the required integer
-full-field output, so no artificial readout cost is added. Rows are identified
-by `pipeline` and the summary reports completed-modal/standard runtime and
-memory ratios, including setup amortization and finite break-even counts. Pass
-`--no-include-standard-comparator` to run only the component study.
+By default, the study also interleaves two implementations of the exact
+aggregated multinomial random walk on every configuration: the original
+node-loop `aggregated_multinomial` method and the batched conditional-binomial
+`aggregated_multinomial_vectorized` method. Both natively return the required
+integer full-field output, so no artificial readout cost is added. CSV rows are
+identified by `pipeline` and `method`; the vectorized method is the primary
+standard for completed-modal runtime, memory, amortization, and break-even
+ratios. Pass `--no-include-standard-comparator` to disable both comparators.
 
 Three staged scaling drivers live under `examples/`:
 
