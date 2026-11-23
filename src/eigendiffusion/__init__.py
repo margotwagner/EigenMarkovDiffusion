@@ -81,6 +81,12 @@ from .distribution_metrics import (
     summarize_distribution_ensemble,
     wasserstein_distance_1d,
 )
+from .direct_modal import DirectModalGaussianDiffusion, DirectModalGaussianResult
+from .innovation_completion import (
+    InnovationConditionedCompletionResult,
+    InnovationConditionedModalCompleter,
+    InnovationConditioningStep,
+)
 from .correlated_modal import (
     BankedCorrelatedModalDiffusion,
     BankedCorrelatedModalResult,
@@ -231,6 +237,8 @@ __all__ = [
     "HandoffPrediction",
     "DiffusionConfig",
     "DiffusionMethodBenchmark",
+    "DirectModalGaussianDiffusion",
+    "DirectModalGaussianResult",
     "DistributionDiagnostics",
     "EigenMarkovDiffusion",
     "EigenMarkovResult",
@@ -246,6 +254,9 @@ __all__ = [
     "StandardSimulationMemoryRecord",
     "StandardTimingSample",
     "IndependentModalDiffusion",
+    "InnovationConditionedCompletionResult",
+    "InnovationConditionedModalCompleter",
+    "InnovationConditioningStep",
     "LocalPersistentUnresolvedGaussianCompleter",
     "MODAL_MODEL_NAMES",
     "ModeSelectionPolicy",

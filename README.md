@@ -18,6 +18,10 @@ reduced modal model remains the central research question.
   nonnegative, mass-conserving spatial bank.
 - `handoff_correlated_modal` — starts at high modal rank and switches to a
   reduced basis at a chosen time.
+- `direct_modal_gaussian` — a prepared retained-dimensional Gaussian
+  transition with exact projected first and second temporal moments.
+- `innovation_conditioned_modal_completion` — completes a direct retained
+  trajectory by conditioning unresolved transition innovations.
 
 Output-only readouts can transform a modal trajectory without changing its
 dynamics:
@@ -32,7 +36,9 @@ dynamics:
 - `local_persistent_unresolved_completion_simplex_bank`
 
 See [Modal models](docs/MODAL_MODELS.md) and
-[Mathematical details](docs/MATH.md) for definitions and assumptions.
+[Mathematical details](docs/MATH.md) for definitions and assumptions. The
+direct-transition prototype, benchmark, and current decision are documented in
+[Direct retained-modal transition](docs/DIRECT_MODAL_TRANSITION.md).
 
 ## Installation
 
@@ -124,6 +130,8 @@ The available workflows are:
 | `benchmark-models` | Benchmark full, reduced, and completed model pipelines |
 | `benchmark-components` | Time setup, dynamics, completion, and full-field readouts separately |
 | `benchmark-component-scaling` | Scale component timing and isolated memory across node counts |
+| `python -m eigendiffusion.direct_modal_benchmark` | Screen the direct retained transition across nodes and modes |
+| `python -m eigendiffusion.innovation_completion_benchmark` | Screen low-rank conditional innovation completion |
 | `study-operating-points` | Benchmark selected completed pipelines, peak RSS, and distribution error |
 | `study-structured-closure` | Select, validate, and scale the local persistent closure |
 | `study-fitted-closure` | Train and test a frozen trajectory-fitted sparse closure |
