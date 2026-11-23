@@ -122,10 +122,37 @@ The available workflows are:
 | `sweep-completion-rank` | Sweep unresolved Gaussian completion rank |
 | `compare-temporal-correlation` | Compare empirical and exact cross-time covariance |
 | `benchmark-models` | Benchmark full, reduced, and completed model pipelines |
+| `benchmark-components` | Time setup, dynamics, completion, and full-field readouts separately |
+| `benchmark-component-scaling` | Scale component timing and isolated memory across node counts |
 | `study-operating-points` | Benchmark selected completed pipelines, peak RSS, and distribution error |
 | `study-structured-closure` | Select, validate, and scale the local persistent closure |
 | `study-fitted-closure` | Train and test a frozen trajectory-fitted sparse closure |
 | `benchmark-random-walk` | Compare particle and aggregated random-walk baselines |
+
+Break the canonical accuracy-first pipeline into construction, raw dynamics,
+persistent completion, and full-field physical-readout costs with:
+
+```bash
+python -m eigendiffusion benchmark-components
+```
+
+The command independently times continuous simplex and temporal Delta-Sigma
+integer readouts on the same completed workload and writes long-format samples
+plus a JSON summary under `outputs/component_benchmark/`.
+
+Sweep the same component breakdown across spatial resolutions with:
+
+```bash
+python -m eigendiffusion benchmark-component-scaling
+```
+
+The `fixed_steps` regime holds the number of updates fixed and reduces `dt` as
+needed for stability, isolating spatial work per update while allowing the
+physical duration to change. The `fixed_duration` regime holds physical time
+fixed, so finer grids may require more stable updates. Timing samples and
+fresh-process RSS measurements are written separately to
+`scaling_samples.csv` and `scaling_memory.csv`; `scaling_summary.json` combines
+their scaling slopes without adding memory-sampling overhead to timed runs.
 
 Three staged scaling drivers live under `examples/`:
 

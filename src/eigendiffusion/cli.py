@@ -32,6 +32,17 @@ from .completion import (
     LocalPersistentUnresolvedGaussianCompleter,
     PersistentUnresolvedGaussianCompleter,
 )
+from .component_benchmark import (
+    COMPONENT_BENCHMARK_REGIMES,
+    COMPONENT_READOUT_NAMES,
+    benchmark_component_scaling,
+    benchmark_full_field_components,
+    write_component_benchmark_csv,
+    write_component_memory_csv,
+    write_component_scaling_csv,
+    write_component_scaling_summary,
+    write_component_benchmark_summary,
+)
 from .distribution_metrics import summarize_distribution_ensemble
 from .fitted_study import run_fitted_closure_study
 from .ensemble import (
@@ -1904,6 +1915,96 @@ def run_diffusion_method_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_component_benchmark(args: argparse.Namespace) -> int:
+    """Measure the canonical completed pipeline one stage at a time."""
+
+    if not 0.0 <= args.impulse_fraction <= 1.0:
+        raise ValueError("impulse_fraction must lie in [0, 1]")
+    impulse_index = int(round(args.impulse_fraction * (args.nodes - 1)))
+    config = DiffusionConfig(
+        n_particles=args.particles,
+        n_nodes=args.nodes,
+        n_steps=args.steps,
+        impulse_index=impulse_index,
+        dt=args.dt,
+        length=args.length,
+        diffusion_coefficient=args.diffusion,
+    )
+    benchmark = benchmark_full_field_components(
+        config,
+        retained_modes=args.modes,
+        handoff_time=args.handoff_time,
+        completion_rank=args.completion_rank,
+        completion_ridge=args.completion_ridge,
+        readouts=tuple(args.readouts),
+        setup_repeats=args.setup_repeats,
+        trajectory_repeats=args.repeats,
+        warmup_runs=args.warmups,
+        seed=args.seed,
+    )
+    csv_path = write_component_benchmark_csv(benchmark, args.csv_output)
+    summary_path = write_component_benchmark_summary(
+        benchmark,
+        args.summary_output,
+    )
+    summary = benchmark.summary()
+    summary["artifacts"] = {
+        "samples_csv": str(csv_path),
+        "summary_json": str(summary_path),
+    }
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def run_component_scaling_benchmark(args: argparse.Namespace) -> int:
+    """Run two-regime component timing and isolated-memory scaling."""
+
+    scaling = benchmark_component_scaling(
+        node_counts=args.node_counts,
+        regimes=tuple(args.regimes),
+        operating_point=args.operating_point,
+        n_particles=args.particles,
+        fixed_steps=args.steps,
+        total_time=args.total_time,
+        requested_dt=args.dt,
+        length=args.length,
+        diffusion_coefficient=args.diffusion,
+        impulse_fraction=args.impulse_fraction,
+        stability_safety=args.stability_safety,
+        completion_ridge=args.completion_ridge,
+        readouts=tuple(args.readouts),
+        setup_repeats=args.setup_repeats,
+        trajectory_repeats=args.repeats,
+        warmup_runs=args.warmups,
+        seed=args.seed,
+        isolate_memory=args.isolate_memory,
+        memory_sampler_interval_ms=args.memory_sampler_interval_ms,
+    )
+    timing_path = write_component_scaling_csv(scaling, args.csv_output)
+    memory_path = write_component_memory_csv(scaling, args.memory_output)
+    summary_path = write_component_scaling_summary(scaling, args.summary_output)
+    summary = scaling.summary()
+    report = {
+        "configuration": {
+            "node_counts": sorted(set(args.node_counts)),
+            "regimes": list(dict.fromkeys(args.regimes)),
+            "operating_point": args.operating_point,
+            "readouts": list(dict.fromkeys(args.readouts)),
+            "setup_repeats": args.setup_repeats,
+            "trajectory_repeats": args.repeats,
+            "isolate_memory": args.isolate_memory,
+        },
+        "scaling_slopes": summary["scaling_slopes"],
+        "artifacts": {
+            "samples_csv": str(timing_path),
+            "memory_csv": str(memory_path),
+            "summary_json": str(summary_path),
+        },
+    }
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def run_operating_point_study(args: argparse.Namespace) -> int:
     """Benchmark selected pipelines and compare their full distributions."""
 
@@ -3234,6 +3335,116 @@ def build_parser() -> argparse.ArgumentParser:
         default="outputs/performance/model_scaling.csv",
     )
     method_benchmark.set_defaults(handler=run_diffusion_method_benchmark)
+
+    component_benchmark = subparsers.add_parser(
+        "benchmark-components",
+        help=(
+            "Measure setup, dynamics, completion, and physical-readout costs "
+            "for one full-field completed modal pipeline."
+        ),
+    )
+    component_benchmark.add_argument("--particles", type=int, default=5_275)
+    component_benchmark.add_argument("--nodes", type=int, default=101)
+    component_benchmark.add_argument("--steps", type=int, default=101)
+    component_benchmark.add_argument("--dt", type=float, default=1.0)
+    component_benchmark.add_argument("--length", type=float, default=4.0)
+    component_benchmark.add_argument("--diffusion", type=float, default=2.20e-4)
+    component_benchmark.add_argument(
+        "--impulse-fraction",
+        type=float,
+        default=0.59,
+        help="Impulse location as a fraction of the spatial domain.",
+    )
+    component_benchmark.add_argument("--modes", type=int, default=75)
+    component_benchmark.add_argument("--handoff-time", type=float, default=30.0)
+    component_benchmark.add_argument("--completion-rank", type=int, default=5)
+    component_benchmark.add_argument("--completion-ridge", type=float, default=0.01)
+    component_benchmark.add_argument(
+        "--readouts",
+        nargs="+",
+        choices=COMPONENT_READOUT_NAMES,
+        default=list(COMPONENT_READOUT_NAMES),
+    )
+    component_benchmark.add_argument("--setup-repeats", type=int, default=5)
+    component_benchmark.add_argument("--repeats", type=int, default=10)
+    component_benchmark.add_argument("--warmups", type=int, default=1)
+    component_benchmark.add_argument("--seed", type=int, default=0)
+    component_benchmark.add_argument(
+        "--csv-output",
+        default="outputs/component_benchmark/canonical_samples.csv",
+    )
+    component_benchmark.add_argument(
+        "--summary-output",
+        default="outputs/component_benchmark/canonical_summary.json",
+    )
+    component_benchmark.set_defaults(handler=run_component_benchmark)
+
+    component_scaling = subparsers.add_parser(
+        "benchmark-component-scaling",
+        help=(
+            "Scale full-field component timings under fixed-step and fixed-duration "
+            "regimes, with optional fresh-process memory measurements."
+        ),
+    )
+    component_scaling.add_argument(
+        "--node-counts",
+        type=int,
+        nargs="+",
+        default=[51, 101, 151, 201],
+    )
+    component_scaling.add_argument(
+        "--regimes",
+        nargs="+",
+        choices=COMPONENT_BENCHMARK_REGIMES,
+        default=list(COMPONENT_BENCHMARK_REGIMES),
+    )
+    component_scaling.add_argument(
+        "--operating-point",
+        choices=[point.name for point in SELECTED_OPERATING_POINTS],
+        default="accuracy_first",
+    )
+    component_scaling.add_argument("--particles", type=int, default=5_275)
+    component_scaling.add_argument("--steps", type=int, default=101)
+    component_scaling.add_argument("--total-time", type=float, default=100.0)
+    component_scaling.add_argument("--dt", type=float, default=1.0)
+    component_scaling.add_argument("--length", type=float, default=4.0)
+    component_scaling.add_argument("--diffusion", type=float, default=2.20e-4)
+    component_scaling.add_argument("--impulse-fraction", type=float, default=0.59)
+    component_scaling.add_argument("--stability-safety", type=float, default=0.95)
+    component_scaling.add_argument("--completion-ridge", type=float, default=0.01)
+    component_scaling.add_argument(
+        "--readouts",
+        nargs="+",
+        choices=COMPONENT_READOUT_NAMES,
+        default=list(COMPONENT_READOUT_NAMES),
+    )
+    component_scaling.add_argument("--setup-repeats", type=int, default=5)
+    component_scaling.add_argument("--repeats", type=int, default=10)
+    component_scaling.add_argument("--warmups", type=int, default=1)
+    component_scaling.add_argument("--seed", type=int, default=0)
+    component_scaling.add_argument(
+        "--isolate-memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    component_scaling.add_argument(
+        "--memory-sampler-interval-ms",
+        type=float,
+        default=1.0,
+    )
+    component_scaling.add_argument(
+        "--csv-output",
+        default="outputs/component_benchmark/scaling_samples.csv",
+    )
+    component_scaling.add_argument(
+        "--memory-output",
+        default="outputs/component_benchmark/scaling_memory.csv",
+    )
+    component_scaling.add_argument(
+        "--summary-output",
+        default="outputs/component_benchmark/scaling_summary.json",
+    )
+    component_scaling.set_defaults(handler=run_component_scaling_benchmark)
 
     operating_points = subparsers.add_parser(
         "study-operating-points",
