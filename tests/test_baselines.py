@@ -3,6 +3,7 @@ import numpy as np
 from eigendiffusion import DiffusionConfig
 from eigendiffusion.baselines import (
     deterministic_diffusion,
+    deterministic_markov_diffusion,
     multinomial_random_walk_diffusion,
     naive_random_walk_diffusion,
     naive_random_walk_trajectories,
@@ -10,6 +11,7 @@ from eigendiffusion.baselines import (
     vectorized_multinomial_random_walk_diffusion,
 )
 from eigendiffusion.ensemble import run_random_walk_ensemble
+from eigendiffusion.references import discrete_expected_diffusion
 
 
 def test_deterministic_full_basis_reconstructs_impulse_and_mass():
@@ -19,6 +21,43 @@ def test_deterministic_full_basis_reconstructs_impulse_and_mass():
     expected[config.impulse_index] = config.n_particles
     assert np.allclose(values[0], expected, atol=1e-10)
     assert np.allclose(values.sum(axis=1), config.n_particles, atol=1e-10)
+
+
+def test_deterministic_markov_matches_exact_discrete_mean_and_is_physical():
+    config = DiffusionConfig(
+        n_particles=101,
+        n_nodes=9,
+        n_steps=12,
+        impulse_index=0,
+        diffusion_coefficient=5.0e-4,
+    )
+    values = deterministic_markov_diffusion(config)
+
+    assert values.dtype == np.float64
+    assert values.shape == (config.n_steps, config.n_nodes)
+    assert np.all(values >= 0.0)
+    assert np.allclose(values.sum(axis=1), config.n_particles, atol=1e-12)
+    np.testing.assert_allclose(
+        values,
+        discrete_expected_diffusion(config),
+        atol=1e-10,
+    )
+
+
+def test_deterministic_markov_handles_two_nodes_and_maximal_probability():
+    config = DiffusionConfig(
+        n_particles=101,
+        n_nodes=2,
+        n_steps=3,
+        impulse_index=0,
+        dt=1.0,
+        length=1.0,
+        diffusion_coefficient=0.5,
+    )
+    values = deterministic_markov_diffusion(config)
+
+    np.testing.assert_allclose(values[1], [50.5, 50.5])
+    np.testing.assert_allclose(values[2], [50.5, 50.5])
 
 
 def _assert_physical_random_walk(values, config):

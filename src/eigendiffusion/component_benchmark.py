@@ -25,6 +25,7 @@ from typing import Literal, Sequence
 import numpy as np
 
 from .baselines import (
+    deterministic_markov_diffusion,
     multinomial_random_walk_diffusion,
     vectorized_multinomial_random_walk_diffusion,
 )
@@ -59,15 +60,24 @@ COMPONENT_BENCHMARK_REGIMES: tuple[ComponentBenchmarkRegime, ...] = (
 StandardComparatorMethod = Literal[
     "aggregated_multinomial",
     "aggregated_multinomial_vectorized",
+    "deterministic_markov",
 ]
 STANDARD_COMPARATOR_METHOD = "aggregated_multinomial"
 VECTORIZED_STANDARD_COMPARATOR_METHOD = "aggregated_multinomial_vectorized"
+DETERMINISTIC_MARKOV_METHOD = "deterministic_markov"
 PRIMARY_STANDARD_COMPARATOR_METHOD = VECTORIZED_STANDARD_COMPARATOR_METHOD
 STANDARD_COMPARATOR_METHODS: tuple[StandardComparatorMethod, ...] = (
     STANDARD_COMPARATOR_METHOD,
     VECTORIZED_STANDARD_COMPARATOR_METHOD,
+    DETERMINISTIC_MARKOV_METHOD,
 )
 STANDARD_COMPARATOR_VARIANT = "native_integer_counts"
+DETERMINISTIC_MARKOV_VARIANT = "expected_real_counts"
+STANDARD_COMPARATOR_VARIANTS = {
+    STANDARD_COMPARATOR_METHOD: STANDARD_COMPARATOR_VARIANT,
+    VECTORIZED_STANDARD_COMPARATOR_METHOD: STANDARD_COMPARATOR_VARIANT,
+    DETERMINISTIC_MARKOV_METHOD: DETERMINISTIC_MARKOV_VARIANT,
+}
 STANDARD_COMPARATOR_SEED_CHANNELS = {
     STANDARD_COMPARATOR_METHOD: 3,
     VECTORIZED_STANDARD_COMPARATOR_METHOD: 4,
@@ -87,26 +97,53 @@ ComponentName = Literal[
 def _run_standard_comparator(
     method: str,
     config: DiffusionConfig,
-    rng: np.random.Generator,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     if method == STANDARD_COMPARATOR_METHOD:
+        if rng is None:
+            raise ValueError("aggregated multinomial comparator requires an RNG")
         return multinomial_random_walk_diffusion(config, rng=rng)
     if method == VECTORIZED_STANDARD_COMPARATOR_METHOD:
+        if rng is None:
+            raise ValueError("vectorized multinomial comparator requires an RNG")
         return vectorized_multinomial_random_walk_diffusion(config, rng=rng)
+    if method == DETERMINISTIC_MARKOV_METHOD:
+        return deterministic_markov_diffusion(config)
     raise ValueError(f"unknown standard comparator method: {method}")
+
+
+def _standard_comparator_variant(method: str) -> str:
+    try:
+        return STANDARD_COMPARATOR_VARIANTS[method]
+    except KeyError as error:
+        raise ValueError(f"unknown standard comparator method: {method}") from error
+
+
+def _standard_comparator_requires_integer(method: str) -> bool:
+    if method not in STANDARD_COMPARATOR_METHODS:
+        raise ValueError(f"unknown standard comparator method: {method}")
+    return method != DETERMINISTIC_MARKOV_METHOD
+
+
+def _standard_comparator_is_stochastic(method: str) -> bool:
+    if method not in STANDARD_COMPARATOR_METHODS:
+        raise ValueError(f"unknown standard comparator method: {method}")
+    return method != DETERMINISTIC_MARKOV_METHOD
 
 
 def _standard_transient_core_array_bytes(
     method: str,
     config: DiffusionConfig,
 ) -> int:
-    output_bytes = config.n_steps * config.n_nodes * np.dtype(np.int64).itemsize
-    node_vector_bytes = config.n_nodes * np.dtype(np.int64).itemsize
+    output_bytes = config.n_steps * config.n_nodes * np.dtype(np.float64).itemsize
+    node_vector_bytes = config.n_nodes * np.dtype(np.float64).itemsize
     if method == STANDARD_COMPARATOR_METHOD:
         return output_bytes + node_vector_bytes
     if method == VECTORIZED_STANDARD_COMPARATOR_METHOD:
         # Movers/right integer vectors plus move-probability/right-share vectors.
         return output_bytes + 4 * node_vector_bytes
+    if method == DETERMINISTIC_MARKOV_METHOD:
+        return output_bytes + node_vector_bytes
     raise ValueError(f"unknown standard comparator method: {method}")
 
 
@@ -150,7 +187,7 @@ class StandardTimingSample:
             "component": "trajectory_total",
             "repeat": self.repeat,
             "seconds": self.seconds,
-            "readout": STANDARD_COMPARATOR_VARIANT,
+            "readout": _standard_comparator_variant(self.method),
             "method": self.method,
             "execution_position": self.execution_position,
             "seed_id": self.seed_id,
@@ -159,7 +196,7 @@ class StandardTimingSample:
 
 @dataclass(frozen=True, slots=True)
 class StandardSimulationBenchmark:
-    """Aligned exact aggregated-random-walk timing for one configuration."""
+    """Aligned full-state baseline timing for one configuration."""
 
     method: str
     config: DiffusionConfig
@@ -175,7 +212,12 @@ class StandardSimulationBenchmark:
     def sample_rows(self) -> list[dict[str, str | int | float]]:
         configuration: dict[str, str | int | float] = {
             "pipeline": self.method,
-            "variant": STANDARD_COMPARATOR_VARIANT,
+            "variant": _standard_comparator_variant(self.method),
+            "output_semantics": (
+                "stochastic_trajectory"
+                if _standard_comparator_is_stochastic(self.method)
+                else "deterministic_expected_field"
+            ),
             "regime": self.regime,
             "output_workload": "full_field_every_timestep",
             "n_particles": self.config.n_particles,
@@ -202,7 +244,13 @@ class StandardSimulationBenchmark:
         return {
             "configuration": {
                 "method": self.method,
-                "variant": STANDARD_COMPARATOR_VARIANT,
+                "variant": _standard_comparator_variant(self.method),
+                "output_semantics": (
+                    "stochastic_trajectory"
+                    if _standard_comparator_is_stochastic(self.method)
+                    else "deterministic_expected_field"
+                ),
+                "stochastic": _standard_comparator_is_stochastic(self.method),
                 "regime": self.regime,
                 "n_particles": self.config.n_particles,
                 "n_nodes": self.config.n_nodes,
@@ -215,6 +263,9 @@ class StandardSimulationBenchmark:
                 "trajectory_repeats": self.trajectory_repeats,
                 "warmup_runs": self.warmup_runs,
                 "seed": self.seed,
+                "seed_applicable": _standard_comparator_is_stochastic(
+                    self.method
+                ),
                 "output_workload": "full_field_every_timestep",
                 "setup_applicable": False,
             },
@@ -287,6 +338,7 @@ class FullFieldComponentBenchmark:
         configuration: dict[str, str | int | float] = {
             "pipeline": "completed_modal",
             "variant": "",
+            "output_semantics": "stochastic_trajectory",
             "regime": self.regime,
             "output_workload": "full_field_every_timestep",
             "n_particles": self.config.n_particles,
@@ -487,6 +539,7 @@ class ComponentMemoryRecord:
         row["method"] = "completed_modal"
         row["pipeline"] = "completed_modal"
         row["variant"] = self.readout
+        row["output_semantics"] = "stochastic_trajectory"
         row["setup_applicable"] = True
         row["setup_peak_incremental_bytes"] = self.setup_peak_incremental_bytes
         row["steady_setup_incremental_bytes"] = self.steady_setup_incremental_bytes
@@ -504,7 +557,7 @@ class ComponentMemoryRecord:
 
 @dataclass(frozen=True, slots=True)
 class StandardSimulationMemoryRecord:
-    """Fresh-process memory for the exact aggregated standard simulation."""
+    """Fresh-process memory for one full-state baseline."""
 
     regime: ComponentBenchmarkRegime
     operating_point: str
@@ -565,6 +618,11 @@ class StandardSimulationMemoryRecord:
     def as_dict(self) -> dict[str, str | int | float | bool]:
         row: dict[str, str | int | float | bool] = asdict(self)
         row["pipeline"] = self.method
+        row["output_semantics"] = (
+            "stochastic_trajectory"
+            if _standard_comparator_is_stochastic(self.method)
+            else "deterministic_expected_field"
+        )
         row["setup_peak_incremental_bytes"] = self.setup_peak_incremental_bytes
         row["steady_setup_incremental_bytes"] = self.steady_setup_incremental_bytes
         row["trajectory_peak_over_setup_bytes"] = self.trajectory_peak_over_setup_bytes
@@ -707,13 +765,22 @@ class ComponentScalingBenchmark:
         ]
 
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "operating_point": self.operating_point,
             "study_contract": {
                 "output_workload": "full_field_every_timestep",
                 "common_time_grid": True,
                 "standard_comparators": list(STANDARD_COMPARATOR_METHODS),
                 "primary_standard_comparator": PRIMARY_STANDARD_COMPARATOR_METHOD,
+                "standard_comparator_semantics": {
+                    STANDARD_COMPARATOR_METHOD: "exact_stochastic_trajectory",
+                    VECTORIZED_STANDARD_COMPARATOR_METHOD: (
+                        "exact_stochastic_trajectory"
+                    ),
+                    DETERMINISTIC_MARKOV_METHOD: (
+                        "exact_deterministic_expected_field"
+                    ),
+                },
                 "standard_setup_applicable": False,
                 "operating_point_parameters_scale_with_nodes": True,
                 "fixed_steps": (
@@ -861,6 +928,9 @@ def _configuration_comparison(
     for standard in benchmark.standard_benchmarks:
         standard_seconds = float(standard.summary()["timing"]["median_seconds"])
         standard_seconds_by_method[standard.method] = standard_seconds
+        stochastic_comparison = _standard_comparator_is_stochastic(
+            standard.method
+        )
         standard_memory = next(
             (
                 item
@@ -890,7 +960,7 @@ def _configuration_comparison(
                 for repeat in sorted(modal_by_repeat.keys() & standard_by_repeat.keys())
             ]
             break_even = None
-            if modal_seconds < standard_seconds:
+            if stochastic_comparison and modal_seconds < standard_seconds:
                 break_even = max(
                     1,
                     int(
@@ -932,6 +1002,9 @@ def _configuration_comparison(
                     ),
                 }
             readout_comparisons[readout] = {
+                "statistically_aligned_stochastic_workload": (
+                    stochastic_comparison
+                ),
                 "steady_runtime_ratio_modal_over_standard": _safe_ratio(
                     modal_seconds,
                     standard_seconds,
@@ -947,10 +1020,16 @@ def _configuration_comparison(
                     for count in (1, 10, 100, 1_000)
                 },
                 "break_even_trajectories": break_even,
+                "break_even_applicable": stochastic_comparison,
                 "memory": memory_comparison,
             }
         standard_comparisons[standard.method] = {
             "standard_median_seconds": standard_seconds,
+            "output_semantics": (
+                "stochastic_trajectory"
+                if stochastic_comparison
+                else "deterministic_expected_field"
+            ),
             "readouts": readout_comparisons,
         }
 
@@ -967,6 +1046,15 @@ def _configuration_comparison(
     implementation_speedup = None
     if loop_seconds is not None and vectorized_seconds is not None:
         implementation_speedup = _safe_ratio(loop_seconds, vectorized_seconds)
+    deterministic_seconds = standard_seconds_by_method.get(
+        DETERMINISTIC_MARKOV_METHOD
+    )
+    stochastic_over_deterministic = None
+    if vectorized_seconds is not None and deterministic_seconds is not None:
+        stochastic_over_deterministic = _safe_ratio(
+            vectorized_seconds,
+            deterministic_seconds,
+        )
     return {
         "regime": benchmark.regime,
         "n_nodes": benchmark.config.n_nodes,
@@ -980,6 +1068,9 @@ def _configuration_comparison(
         "primary_standard_method": primary_method,
         "standard_implementation_speedup_loop_over_vectorized": (
             implementation_speedup
+        ),
+        "standard_runtime_ratio_vectorized_stochastic_over_deterministic_mean": (
+            stochastic_over_deterministic
         ),
         "modal_setup_median_seconds": setup_seconds,
         "standards": standard_comparisons,
@@ -1021,6 +1112,20 @@ def _balanced_execution_orders(
             (2, 3, 0, 1),
             (3, 0, 1, 2),
             (0, 2, 3, 1),
+        )
+        index_orders = tuple(
+            order
+            for base in base_orders
+            for order in (base, tuple(reversed(base)))
+        )
+        return tuple(tuple(values[index] for index in order) for order in index_orders)
+    if len(values) == 5:
+        # Five cyclic rotations and their reverses give ten orders. Every task
+        # occupies each absolute position twice, and each pair appears in both
+        # relative orders five times.
+        indices = tuple(range(5))
+        base_orders = tuple(
+            indices[offset:] + indices[:offset] for offset in range(5)
         )
         index_orders = tuple(
             order
@@ -1279,18 +1384,25 @@ def benchmark_full_field_components(
             )
         if include_standard_comparator:
             for method in STANDARD_COMPARATOR_METHODS:
-                channel = STANDARD_COMPARATOR_SEED_CHANNELS[method]
+                channel = STANDARD_COMPARATOR_SEED_CHANNELS.get(method)
+                standard_rng = (
+                    None
+                    if channel is None
+                    else np.random.default_rng(
+                        np.random.SeedSequence([seed, 0, channel, warmup])
+                    )
+                )
                 standard_warmup = _run_standard_comparator(
                     method,
                     config,
-                    np.random.default_rng(
-                        np.random.SeedSequence([seed, 0, channel, warmup])
-                    ),
+                    standard_rng,
                 )
                 validate_full_field_output(
                     standard_warmup,
                     config,
-                    require_integer=True,
+                    require_integer=_standard_comparator_requires_integer(
+                        method
+                    ),
                 )
                 del standard_warmup
 
@@ -1390,28 +1502,34 @@ def benchmark_full_field_components(
             ]
             if include_standard_comparator:
                 total_tasks.extend(
-                    (method, STANDARD_COMPARATOR_VARIANT)
+                    (method, _standard_comparator_variant(method))
                     for method in STANDARD_COMPARATOR_METHODS
                 )
             task_orders = _balanced_execution_orders(total_tasks)
             total_tasks = list(task_orders[repeat % len(task_orders)])
             for execution_position, (method, variant) in enumerate(total_tasks):
                 if method in STANDARD_COMPARATOR_METHODS:
-                    channel = STANDARD_COMPARATOR_SEED_CHANNELS[method]
-                    standard_sequence = np.random.SeedSequence(
-                        [seed, channel, repeat]
+                    channel = STANDARD_COMPARATOR_SEED_CHANNELS.get(method)
+                    standard_rng = (
+                        None
+                        if channel is None
+                        else np.random.default_rng(
+                            np.random.SeedSequence([seed, channel, repeat])
+                        )
                     )
                     start = perf_counter()
                     standard_counts = _run_standard_comparator(
                         method,
                         config,
-                        np.random.default_rng(standard_sequence),
+                        standard_rng,
                     )
                     total_seconds = perf_counter() - start
                     validate_full_field_output(
                         standard_counts,
                         config,
-                        require_integer=True,
+                        require_integer=_standard_comparator_requires_integer(
+                            method
+                        ),
                     )
                     standard_samples[method].append(
                         StandardTimingSample(
@@ -1419,7 +1537,11 @@ def benchmark_full_field_components(
                             repeat=repeat,
                             seconds=total_seconds,
                             execution_position=execution_position,
-                            seed_id=f"{seed}:{channel}:{repeat}",
+                            seed_id=(
+                                f"{seed}:{channel}:{repeat}"
+                                if channel is not None
+                                else ""
+                            ),
                         )
                     )
                     standard_diagnostics[method].append(
@@ -1807,7 +1929,7 @@ def measure_standard_comparator_memory(
     sampler_interval_ms: float = 1.0,
     worker_timeout_seconds: float = 300.0,
 ) -> StandardSimulationMemoryRecord:
-    """Measure native aggregated-random-walk memory in a fresh process."""
+    """Measure one full-state baseline's memory in a fresh process."""
 
     if sampler_interval_ms <= 0.0:
         raise ValueError("sampler_interval_ms must be positive")
@@ -1840,7 +1962,7 @@ def measure_standard_comparator_memory(
         regime=regime,
         operating_point=operating_point,
         method=method,
-        variant=STANDARD_COMPARATOR_VARIANT,
+        variant=_standard_comparator_variant(method),
         n_particles=config.n_particles,
         n_nodes=config.n_nodes,
         n_steps=config.n_steps,
@@ -1972,7 +2094,10 @@ def benchmark_component_scaling(
                                 seed=(
                                     configuration_seed
                                     + 10_000
-                                    + STANDARD_COMPARATOR_SEED_CHANNELS[method]
+                                    + STANDARD_COMPARATOR_SEED_CHANNELS.get(
+                                        method,
+                                        0,
+                                    )
                                 ),
                                 sampler_interval_ms=memory_sampler_interval_ms,
                             )

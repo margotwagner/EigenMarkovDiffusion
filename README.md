@@ -153,14 +153,17 @@ fixed, so finer grids may require more stable updates. Timing samples and
 fresh-process RSS measurements are written separately to
 `scaling_samples.csv` and `scaling_memory.csv`; `scaling_summary.json` combines
 their scaling slopes without adding memory-sampling overhead to timed runs.
-By default, the study also interleaves two implementations of the exact
-aggregated multinomial random walk on every configuration: the original
-node-loop `aggregated_multinomial` method and the batched conditional-binomial
-`aggregated_multinomial_vectorized` method. Both natively return the required
-integer full-field output, so no artificial readout cost is added. CSV rows are
-identified by `pipeline` and `method`; the vectorized method is the primary
-standard for completed-modal runtime, memory, amortization, and break-even
-ratios. Pass `--no-include-standard-comparator` to disable both comparators.
+By default, the study also interleaves three full-state baselines on every
+configuration. The original node-loop `aggregated_multinomial` method and the
+batched conditional-binomial `aggregated_multinomial_vectorized` method sample
+the same exact integer stochastic process. The `deterministic_markov` method
+instead propagates the exact finite-step expected field with the matrix-free
+Markov stencil; it returns nonnegative, mass-conserving real counts but has no
+stochastic variance. CSV rows are identified by `pipeline` and `method`. The
+vectorized stochastic method remains the primary like-for-like comparator for
+runtime, memory, amortization, and break-even ratios; deterministic ratios only
+compare full-field computational work. Pass
+`--no-include-standard-comparator` to disable all three baselines.
 
 Three staged scaling drivers live under `examples/`:
 

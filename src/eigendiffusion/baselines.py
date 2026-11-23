@@ -1,6 +1,12 @@
 """Deterministic and stochastic diffusion baselines.
 
-Three random-walk implementations are provided deliberately:
+Three random-walk implementations and one deterministic Markov baseline are
+provided deliberately:
+
+``deterministic_markov_diffusion``
+    Propagates the full expected node field with the nearest-neighbour Markov
+    transition stencil. It has the same grid and output cadence as the
+    stochastic methods, but it does not sample stochastic fluctuations.
 
 ``naive_random_walk_diffusion``
     Mirrors the original research implementation by simulating and storing the
@@ -41,6 +47,40 @@ def deterministic_diffusion(
     """
 
     return continuous_expected_diffusion(config, n_modes=n_modes)
+
+
+def deterministic_markov_diffusion(config: DiffusionConfig) -> FloatArray:
+    """Propagate the exact finite-step Markov expectation in physical space.
+
+    This computes ``n[t + 1] = P @ n[t]`` for the reflecting-boundary
+    transition matrix ``P = I - dt * A`` using its tridiagonal stencil rather
+    than constructing a dense matrix. The result is a full float64 field of
+    expected counts. It is nonnegative and mass-conserving for
+    ``0 <= jump_probability <= 0.5``, but it is not a stochastic trajectory:
+    its ensemble variance is identically zero.
+    """
+
+    p = float(config.jump_probability)
+    if not 0.0 <= p <= 0.5:
+        raise ValueError("jump_probability must lie in [0, 0.5]")
+
+    counts = np.zeros((config.n_steps, config.n_nodes), dtype=float)
+    counts[0, config.impulse_index] = config.n_particles
+    scaled = np.empty(config.n_nodes, dtype=float)
+    interior_stay = 1.0 - 2.0 * p
+    boundary_stay = 1.0 - p
+
+    for time_index in range(config.n_steps - 1):
+        current = counts[time_index]
+        updated = counts[time_index + 1]
+        np.multiply(current, p, out=scaled)
+        np.multiply(current, interior_stay, out=updated)
+        updated[0] = boundary_stay * current[0]
+        updated[-1] = boundary_stay * current[-1]
+        updated[:-1] += scaled[1:]
+        updated[1:] += scaled[:-1]
+
+    return counts
 
 
 def naive_random_walk_trajectories(

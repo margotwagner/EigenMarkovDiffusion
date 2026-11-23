@@ -6,6 +6,8 @@ import pytest
 
 from eigendiffusion.cli import build_parser
 from eigendiffusion.component_benchmark import (
+    DETERMINISTIC_MARKOV_METHOD,
+    DETERMINISTIC_MARKOV_VARIANT,
     PRIMARY_STANDARD_COMPARATOR_METHOD,
     STANDARD_COMPARATOR_METHOD,
     STANDARD_COMPARATOR_METHODS,
@@ -205,10 +207,10 @@ def test_component_scaling_runs_two_node_counts_and_reports_slopes(tmp_path) -> 
 
     summary = scaling.summary()
     assert summary["operating_point"] == "accuracy_first"
-    assert summary["schema_version"] == 3
+    assert summary["schema_version"] == 4
     assert len(summary["configurations"]) == 4
     assert summary["memory_records"] == []
-    assert len(summary["standard_comparators"]) == 8
+    assert len(summary["standard_comparators"]) == 12
     assert summary["standard_memory_records"] == []
     assert len(summary["comparisons"]) == 4
     assert set(summary["scaling_slopes"]) == {"fixed_steps", "fixed_duration"}
@@ -229,14 +231,43 @@ def test_component_scaling_runs_two_node_counts_and_reports_slopes(tmp_path) -> 
 
     for standard in summary["standard_comparators"]:
         assert standard["configuration"]["setup_applicable"] is False
-        assert standard["memory"]["output_dtype"] == "int64"
-        assert standard["constraints"]["noninteger_entry_fraction"] == 0.0
-        assert standard["constraints"]["maximum_instantaneous_mass_error"] == 0.0
+        method = standard["configuration"]["method"]
+        if method == DETERMINISTIC_MARKOV_METHOD:
+            assert standard["configuration"]["stochastic"] is False
+            assert standard["configuration"]["seed_applicable"] is False
+            assert standard["memory"]["output_dtype"] == "float64"
+            assert standard["constraints"]["noninteger_entry_fraction"] > 0.0
+        else:
+            assert standard["configuration"]["stochastic"] is True
+            assert standard["configuration"]["seed_applicable"] is True
+            assert standard["memory"]["output_dtype"] == "int64"
+            assert standard["constraints"]["noninteger_entry_fraction"] == 0.0
+        assert standard["constraints"]["lower_bound_violation_fraction"] == 0.0
+        assert (
+            standard["constraints"]["maximum_instantaneous_mass_error"]
+            <= 1.0e-12
+        )
     for comparison in summary["comparisons"]:
         assert comparison["primary_standard_method"] == (
             PRIMARY_STANDARD_COMPARATOR_METHOD
         )
         assert set(comparison["standards"]) == set(STANDARD_COMPARATOR_METHODS)
+        deterministic = comparison["standards"][DETERMINISTIC_MARKOV_METHOD]
+        assert deterministic["output_semantics"] == (
+            "deterministic_expected_field"
+        )
+        assert (
+            deterministic["readouts"]["simplex_bank"][
+                "statistically_aligned_stochastic_workload"
+            ]
+            is False
+        )
+        assert (
+            deterministic["readouts"]["simplex_bank"][
+                "break_even_applicable"
+            ]
+            is False
+        )
         for readout in ("simplex_bank",):
             readout_comparison = comparison["readouts"][readout]
             ratio = readout_comparison[
@@ -276,7 +307,18 @@ def test_component_scaling_runs_two_node_counts_and_reports_slopes(tmp_path) -> 
         "completed_modal",
         "aggregated_multinomial",
         "aggregated_multinomial_vectorized",
+        "deterministic_markov",
     }
+    deterministic_rows = [
+        row
+        for row in sample_rows
+        if row["pipeline"] == DETERMINISTIC_MARKOV_METHOD
+    ]
+    assert deterministic_rows
+    assert {
+        row["output_semantics"] for row in deterministic_rows
+    } == {"deterministic_expected_field"}
+    assert {row["seed_id"] for row in deterministic_rows} == {""}
     assert memory_path.read_text(encoding="utf-8") == ""
 
     summary_path = write_component_scaling_summary(
@@ -397,13 +439,20 @@ def test_standard_comparator_is_interleaved_and_satisfies_native_contract() -> N
             1,
             2,
             3,
+            4,
         }
         assert standard.output_array_bytes == 5 * 7 * np.dtype(np.int64).itemsize
-        assert standard.output_dtype == "int64"
-        assert standard.constraint_diagnostics["noninteger_entry_fraction"] == 0.0
+        if standard.method == DETERMINISTIC_MARKOV_METHOD:
+            assert standard.output_dtype == "float64"
+            assert standard.constraint_diagnostics["noninteger_entry_fraction"] > 0.0
+            assert all(sample.seed_id == "" for sample in standard.samples)
+        else:
+            assert standard.output_dtype == "int64"
+            assert standard.constraint_diagnostics["noninteger_entry_fraction"] == 0.0
+            assert all(sample.seed_id for sample in standard.samples)
         assert (
             standard.constraint_diagnostics["maximum_instantaneous_mass_error"]
-            == 0.0
+            <= 1.0e-12
         )
 
     modal_positions = {
@@ -413,7 +462,7 @@ def test_standard_comparator_is_interleaved_and_satisfies_native_contract() -> N
         and sample.readout == "simplex_bank"
     }
     assert set(modal_positions) == set(range(10))
-    assert set(modal_positions.values()) == {0, 1, 2, 3}
+    assert set(modal_positions.values()) == {0, 1, 2, 3, 4}
 
     orders: dict[int, list[tuple[int, str]]] = {
         repeat: [] for repeat in range(10)
@@ -447,15 +496,28 @@ def test_standard_comparator_is_interleaved_and_satisfies_native_contract() -> N
 
 
 @pytest.mark.parametrize(
-    ("method", "workspace_vectors"),
+    ("method", "workspace_vectors", "variant", "dtype"),
     [
-        (STANDARD_COMPARATOR_METHOD, 1),
-        (VECTORIZED_STANDARD_COMPARATOR_METHOD, 4),
+        (STANDARD_COMPARATOR_METHOD, 1, "native_integer_counts", "int64"),
+        (
+            VECTORIZED_STANDARD_COMPARATOR_METHOD,
+            4,
+            "native_integer_counts",
+            "int64",
+        ),
+        (
+            DETERMINISTIC_MARKOV_METHOD,
+            1,
+            DETERMINISTIC_MARKOV_VARIANT,
+            "float64",
+        ),
     ],
 )
 def test_isolated_standard_comparator_memory_worker(
     method: str,
     workspace_vectors: int,
+    variant: str,
+    dtype: str,
 ) -> None:
     config = _tiny_config()
     record = measure_standard_comparator_memory(
@@ -468,7 +530,7 @@ def test_isolated_standard_comparator_memory_worker(
 
     expected_bytes = 5 * 7 * np.dtype(np.int64).itemsize
     assert record.method == method
-    assert record.variant == "native_integer_counts"
+    assert record.variant == variant
     assert record.setup_applicable is False
     assert record.setup_array_bytes == 0
     assert record.resident_array_bytes == expected_bytes
@@ -477,7 +539,7 @@ def test_isolated_standard_comparator_memory_worker(
     assert record.transient_core_array_bytes == (
         expected_bytes + workspace_vectors * 7 * 8
     )
-    assert record.output_dtype == "int64"
+    assert record.output_dtype == dtype
     assert record.process_peak_after_setup_rss_bytes >= record.baseline_peak_rss_bytes
     assert (
         record.process_peak_after_trajectory_rss_bytes

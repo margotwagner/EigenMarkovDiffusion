@@ -14,6 +14,8 @@ from .component_benchmark import (
     STANDARD_COMPARATOR_METHODS,
     _apply_readout,
     _run_standard_comparator,
+    _standard_comparator_is_stochastic,
+    _standard_comparator_requires_integer,
     _standard_transient_core_array_bytes,
     build_full_field_component_pipeline,
     validate_full_field_output,
@@ -81,10 +83,15 @@ def run_worker(spec: dict[str, object]) -> None:
     _emit("trajectory_start")
     _wait_for_parent()
     if method in STANDARD_COMPARATOR_METHODS:
+        standard_rng = (
+            np.random.default_rng(int(spec["seed"]))
+            if _standard_comparator_is_stochastic(method)
+            else None
+        )
         counts = _run_standard_comparator(
             method,
             config,
-            np.random.default_rng(int(spec["seed"])),
+            standard_rng,
         )
         resident_array_bytes = counts.nbytes
         output_array_bytes = counts.nbytes
@@ -128,13 +135,15 @@ def run_worker(spec: dict[str, object]) -> None:
     )
     _wait_for_parent()
 
+    require_integer = (
+        _standard_comparator_requires_integer(method)
+        if method in STANDARD_COMPARATOR_METHODS
+        else str(spec["readout"]) == "delta_sigma_temporal"
+    )
     validate_full_field_output(
         counts,
         config,
-        require_integer=(
-            method in STANDARD_COMPARATOR_METHODS
-            or str(spec["readout"]) == "delta_sigma_temporal"
-        ),
+        require_integer=require_integer,
     )
     _emit("done")
 
