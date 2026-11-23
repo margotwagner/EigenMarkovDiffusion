@@ -17,12 +17,14 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
+from itertools import permutations
 from pathlib import Path
 from time import perf_counter
 from typing import Literal, Sequence
 
 import numpy as np
 
+from .baselines import multinomial_random_walk_diffusion
 from .benchmarking import (
     SELECTED_OPERATING_POINTS,
     OperatingPoint,
@@ -50,6 +52,9 @@ COMPONENT_BENCHMARK_REGIMES: tuple[ComponentBenchmarkRegime, ...] = (
     "fixed_steps",
     "fixed_duration",
 )
+
+STANDARD_COMPARATOR_METHOD = "aggregated_multinomial"
+STANDARD_COMPARATOR_VARIANT = "native_integer_counts"
 
 ComponentName = Literal[
     "simulator_setup",
@@ -79,9 +84,120 @@ class ComponentTimingSample:
     repeat: int
     seconds: float
     readout: str = ""
+    method: str = "completed_modal"
+    execution_position: int = -1
+    seed_id: str = ""
 
     def as_dict(self) -> dict[str, str | int | float]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class StandardTimingSample:
+    """One aligned end-to-end sample from the standard simulation."""
+
+    repeat: int
+    seconds: float
+    execution_position: int
+    seed_id: str
+
+    def as_dict(self) -> dict[str, str | int | float]:
+        return {
+            "component": "trajectory_total",
+            "repeat": self.repeat,
+            "seconds": self.seconds,
+            "readout": STANDARD_COMPARATOR_VARIANT,
+            "method": STANDARD_COMPARATOR_METHOD,
+            "execution_position": self.execution_position,
+            "seed_id": self.seed_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class StandardSimulationBenchmark:
+    """Aligned exact aggregated-random-walk timing for one configuration."""
+
+    config: DiffusionConfig
+    regime: ComponentBenchmarkRegime
+    trajectory_repeats: int
+    warmup_runs: int
+    seed: int
+    samples: tuple[StandardTimingSample, ...]
+    output_array_bytes: int
+    output_dtype: str
+    constraint_diagnostics: dict[str, float]
+
+    def sample_rows(self) -> list[dict[str, str | int | float]]:
+        configuration: dict[str, str | int | float] = {
+            "pipeline": STANDARD_COMPARATOR_METHOD,
+            "variant": STANDARD_COMPARATOR_VARIANT,
+            "regime": self.regime,
+            "output_workload": "full_field_every_timestep",
+            "n_particles": self.config.n_particles,
+            "n_nodes": self.config.n_nodes,
+            "n_steps": self.config.n_steps,
+            "dt": self.config.dt,
+            "length": self.config.length,
+            "diffusion_coefficient": self.config.diffusion_coefficient,
+            "impulse_index": self.config.impulse_index,
+            "retained_modes": "",
+            "handoff_time": "",
+            "completion_rank": "",
+            "completion_ridge": "",
+            "setup_repeats": 0,
+            "trajectory_repeats": self.trajectory_repeats,
+            "warmup_runs": self.warmup_runs,
+        }
+        return [configuration | sample.as_dict() for sample in self.samples]
+
+    def summary(self) -> dict[str, object]:
+        values = np.asarray([sample.seconds for sample in self.samples], dtype=float)
+        median_seconds = float(np.median(values))
+        transitions = self.config.n_steps - 1
+        return {
+            "configuration": {
+                "method": STANDARD_COMPARATOR_METHOD,
+                "variant": STANDARD_COMPARATOR_VARIANT,
+                "regime": self.regime,
+                "n_particles": self.config.n_particles,
+                "n_nodes": self.config.n_nodes,
+                "n_steps": self.config.n_steps,
+                "dt": self.config.dt,
+                "total_time": float(self.config.times[-1]),
+                "length": self.config.length,
+                "diffusion_coefficient": self.config.diffusion_coefficient,
+                "impulse_index": self.config.impulse_index,
+                "trajectory_repeats": self.trajectory_repeats,
+                "warmup_runs": self.warmup_runs,
+                "seed": self.seed,
+                "output_workload": "full_field_every_timestep",
+                "setup_applicable": False,
+            },
+            "timing": {
+                "samples": int(values.size),
+                "median_seconds": median_seconds,
+                "mean_seconds": float(np.mean(values)),
+                "std_seconds": float(np.std(values, ddof=0)),
+                "min_seconds": float(np.min(values)),
+                "max_seconds": float(np.max(values)),
+                "median_seconds_per_transition": median_seconds / transitions,
+                "median_seconds_per_node_transition": (
+                    median_seconds / (transitions * self.config.n_nodes)
+                ),
+                "amortized_seconds_per_trajectory": {
+                    str(count): median_seconds for count in (1, 10, 100, 1_000)
+                },
+            },
+            "memory": {
+                "setup_array_bytes": 0,
+                "setup_array_megabytes": 0.0,
+                "output_array_bytes": self.output_array_bytes,
+                "output_array_megabytes": self.output_array_bytes / 1024**2,
+                "returned_result_array_bytes": self.output_array_bytes,
+                "output_dtype": self.output_dtype,
+            },
+            "constraints": self.constraint_diagnostics,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,11 +221,14 @@ class FullFieldComponentBenchmark:
     output_array_bytes: int
     output_dtype: str
     constraint_diagnostics: dict[str, dict[str, float]]
+    standard_benchmark: StandardSimulationBenchmark | None = None
 
     def sample_rows(self) -> list[dict[str, str | int | float]]:
         """Return long-format timing rows with configuration columns."""
 
         configuration: dict[str, str | int | float] = {
+            "pipeline": "completed_modal",
+            "variant": "",
             "regime": self.regime,
             "output_workload": "full_field_every_timestep",
             "n_particles": self.config.n_particles,
@@ -127,7 +246,13 @@ class FullFieldComponentBenchmark:
             "trajectory_repeats": self.trajectory_repeats,
             "warmup_runs": self.warmup_runs,
         }
-        return [configuration | sample.as_dict() for sample in self.samples]
+        rows: list[dict[str, str | int | float]] = []
+        for sample in self.samples:
+            row = configuration | sample.as_dict()
+            row["pipeline"] = sample.method
+            row["variant"] = sample.readout
+            rows.append(row)
+        return rows
 
     def summary(self) -> dict[str, object]:
         """Summarize timing distributions, accounting, and amortized totals."""
@@ -183,7 +308,7 @@ class FullFieldComponentBenchmark:
                 "constraints": self.constraint_diagnostics[readout],
             }
 
-        return {
+        report: dict[str, object] = {
             "configuration": {
                 "n_particles": self.config.n_particles,
                 "n_nodes": self.config.n_nodes,
@@ -217,6 +342,9 @@ class FullFieldComponentBenchmark:
                 "output_dtype": self.output_dtype,
             },
         }
+        if self.standard_benchmark is not None:
+            report["standard_comparator"] = self.standard_benchmark.summary()
+        return report
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,8 +405,20 @@ class ComponentMemoryRecord:
             - self.process_peak_after_setup_rss_bytes,
         )
 
-    def as_dict(self) -> dict[str, str | int | float]:
-        row: dict[str, str | int | float] = asdict(self)
+    @property
+    def overall_peak_incremental_bytes(self) -> int:
+        return max(
+            0,
+            max(self.setup_peak_rss_bytes, self.trajectory_peak_rss_bytes)
+            - self.baseline_rss_bytes,
+        )
+
+    def as_dict(self) -> dict[str, str | int | float | bool]:
+        row: dict[str, str | int | float | bool] = asdict(self)
+        row["method"] = "completed_modal"
+        row["pipeline"] = "completed_modal"
+        row["variant"] = self.readout
+        row["setup_applicable"] = True
         row["setup_peak_incremental_bytes"] = self.setup_peak_incremental_bytes
         row["steady_setup_incremental_bytes"] = self.steady_setup_incremental_bytes
         row["trajectory_peak_over_setup_bytes"] = self.trajectory_peak_over_setup_bytes
@@ -286,9 +426,88 @@ class ComponentMemoryRecord:
         row["trajectory_hwm_incremental_bytes"] = (
             self.trajectory_hwm_incremental_bytes
         )
+        row["overall_peak_incremental_bytes"] = self.overall_peak_incremental_bytes
         for key, value in tuple(row.items()):
             if key.endswith("_bytes"):
                 row[key.removesuffix("_bytes") + "_megabytes"] = int(value) / 1024**2
+        return row
+
+
+@dataclass(frozen=True, slots=True)
+class StandardSimulationMemoryRecord:
+    """Fresh-process memory for the exact aggregated standard simulation."""
+
+    regime: ComponentBenchmarkRegime
+    operating_point: str
+    method: str
+    variant: str
+    n_particles: int
+    n_nodes: int
+    n_steps: int
+    dt: float
+    total_time: float
+    setup_applicable: bool
+    baseline_rss_bytes: int
+    baseline_peak_rss_bytes: int
+    setup_peak_rss_bytes: int
+    steady_setup_rss_bytes: int
+    process_peak_after_setup_rss_bytes: int
+    trajectory_peak_rss_bytes: int
+    process_peak_after_trajectory_rss_bytes: int
+    final_rss_bytes: int
+    setup_array_bytes: int
+    resident_array_bytes: int
+    output_array_bytes: int
+    returned_result_array_bytes: int
+    transient_core_array_bytes: int
+    output_dtype: str
+    setup_phase_samples: int
+    trajectory_phase_samples: int
+    sampler_interval_ms: float
+
+    @property
+    def setup_peak_incremental_bytes(self) -> int:
+        return max(0, self.setup_peak_rss_bytes - self.baseline_rss_bytes)
+
+    @property
+    def steady_setup_incremental_bytes(self) -> int:
+        return max(0, self.steady_setup_rss_bytes - self.baseline_rss_bytes)
+
+    @property
+    def trajectory_peak_over_setup_bytes(self) -> int:
+        return max(0, self.trajectory_peak_rss_bytes - self.steady_setup_rss_bytes)
+
+    @property
+    def trajectory_hwm_incremental_bytes(self) -> int:
+        return max(
+            0,
+            self.process_peak_after_trajectory_rss_bytes
+            - self.process_peak_after_setup_rss_bytes,
+        )
+
+    @property
+    def overall_peak_incremental_bytes(self) -> int:
+        return max(
+            0,
+            max(self.setup_peak_rss_bytes, self.trajectory_peak_rss_bytes)
+            - self.baseline_rss_bytes,
+        )
+
+    def as_dict(self) -> dict[str, str | int | float | bool]:
+        row: dict[str, str | int | float | bool] = asdict(self)
+        row["pipeline"] = self.method
+        row["setup_peak_incremental_bytes"] = self.setup_peak_incremental_bytes
+        row["steady_setup_incremental_bytes"] = self.steady_setup_incremental_bytes
+        row["trajectory_peak_over_setup_bytes"] = self.trajectory_peak_over_setup_bytes
+        row["trajectory_hwm_incremental_bytes"] = (
+            self.trajectory_hwm_incremental_bytes
+        )
+        row["overall_peak_incremental_bytes"] = self.overall_peak_incremental_bytes
+        for key, value in tuple(row.items()):
+            if key.endswith("_bytes"):
+                row[key.removesuffix("_bytes") + "_megabytes"] = (
+                    int(value) / 1024**2
+                )
         return row
 
 
@@ -299,6 +518,7 @@ class ComponentScalingBenchmark:
     operating_point: str
     benchmarks: tuple[FullFieldComponentBenchmark, ...]
     memory_records: tuple[ComponentMemoryRecord, ...]
+    standard_memory_records: tuple[StandardSimulationMemoryRecord, ...] = ()
 
     def summary(self) -> dict[str, object]:
         """Return all configuration summaries plus log-log scaling slopes."""
@@ -398,10 +618,208 @@ class ComponentScalingBenchmark:
                         ),
                     }
                 )
+        standard_benchmarks = [
+            item.standard_benchmark
+            for item in self.benchmarks
+            if item.standard_benchmark is not None
+        ]
+        standard_slopes: dict[str, dict[str, float | None]] = {}
+        for regime in COMPONENT_BENCHMARK_REGIMES:
+            selected_standard = sorted(
+                (item for item in standard_benchmarks if item.regime == regime),
+                key=lambda item: item.config.n_nodes,
+            )
+            if len(selected_standard) < 2:
+                continue
+            nodes = [float(item.config.n_nodes) for item in selected_standard]
+            output_cells = [
+                float(item.config.n_nodes * item.config.n_steps)
+                for item in selected_standard
+            ]
+            reports = [item.summary() for item in selected_standard]
+            times = [float(item["timing"]["median_seconds"]) for item in reports]
+            per_transition = [
+                float(item["timing"]["median_seconds_per_transition"])
+                for item in reports
+            ]
+            output_bytes = [
+                float(item["memory"]["output_array_bytes"]) for item in reports
+            ]
+            standard_slopes[regime] = {
+                "trajectory_total_vs_nodes": _log_log_slope(nodes, times),
+                "trajectory_total_vs_output_cells": _log_log_slope(
+                    output_cells,
+                    times,
+                ),
+                "seconds_per_transition_vs_nodes": _log_log_slope(
+                    nodes,
+                    per_transition,
+                ),
+                "output_array_bytes_vs_nodes": _log_log_slope(
+                    nodes,
+                    output_bytes,
+                ),
+            }
+            regime_memory = sorted(
+                (
+                    item
+                    for item in self.standard_memory_records
+                    if item.regime == regime
+                ),
+                key=lambda item: item.n_nodes,
+            )
+            if len(regime_memory) >= 2:
+                memory_nodes = [float(item.n_nodes) for item in regime_memory]
+                standard_slopes[regime]["isolated_peak_increment_vs_nodes"] = (
+                    _log_log_slope(
+                        memory_nodes,
+                        [
+                            float(item.overall_peak_incremental_bytes)
+                            for item in regime_memory
+                        ],
+                    )
+                )
+                standard_slopes[regime]["resident_array_bytes_vs_nodes"] = (
+                    _log_log_slope(
+                        memory_nodes,
+                        [float(item.resident_array_bytes) for item in regime_memory],
+                    )
+                )
+
+        comparisons: list[dict[str, object]] = []
+        for benchmark in self.benchmarks:
+            standard = benchmark.standard_benchmark
+            if standard is None:
+                continue
+            modal_report = benchmark.summary()
+            standard_report = standard.summary()
+            standard_seconds = float(
+                standard_report["timing"]["median_seconds"]
+            )
+            setup_seconds = float(
+                modal_report["components"]["setup_total"]["median_seconds"]
+            )
+            standard_memory = next(
+                (
+                    item
+                    for item in self.standard_memory_records
+                    if item.regime == benchmark.regime
+                    and item.n_nodes == benchmark.config.n_nodes
+                ),
+                None,
+            )
+            readout_comparisons: dict[str, dict[str, object]] = {}
+            for readout in benchmark.readouts:
+                modal_seconds = float(
+                    modal_report["readouts"][readout][
+                        "measured_end_to_end_seconds"
+                    ]
+                )
+                modal_by_repeat = {
+                    sample.repeat: sample.seconds
+                    for sample in benchmark.samples
+                    if sample.component == "trajectory_total"
+                    and sample.readout == readout
+                }
+                standard_by_repeat = {
+                    sample.repeat: sample.seconds for sample in standard.samples
+                }
+                paired_ratios = [
+                    modal_by_repeat[repeat] / standard_by_repeat[repeat]
+                    for repeat in sorted(modal_by_repeat.keys() & standard_by_repeat.keys())
+                ]
+                if modal_seconds < standard_seconds:
+                    break_even = max(
+                        1,
+                        int(
+                            np.ceil(
+                                setup_seconds
+                                / (standard_seconds - modal_seconds)
+                            )
+                        ),
+                    )
+                else:
+                    break_even = None
+                modal_memory = next(
+                    (
+                        item
+                        for item in self.memory_records
+                        if item.regime == benchmark.regime
+                        and item.n_nodes == benchmark.config.n_nodes
+                        and item.readout == readout
+                    ),
+                    None,
+                )
+                memory_comparison: dict[str, float | None] | None = None
+                if modal_memory is not None and standard_memory is not None:
+                    memory_comparison = {
+                        "overall_peak_increment_ratio_modal_over_standard": (
+                            _safe_ratio(
+                                modal_memory.overall_peak_incremental_bytes,
+                                standard_memory.overall_peak_incremental_bytes,
+                            )
+                        ),
+                        "logical_peak_array_ratio_modal_over_standard": _safe_ratio(
+                            modal_memory.resident_array_bytes,
+                            standard_memory.transient_core_array_bytes,
+                        ),
+                        "returned_result_array_ratio_modal_over_standard": (
+                            _safe_ratio(
+                                modal_memory.returned_result_array_bytes,
+                                standard_memory.returned_result_array_bytes,
+                            )
+                        ),
+                        "output_array_ratio_modal_over_standard": _safe_ratio(
+                            modal_memory.output_array_bytes,
+                            standard_memory.output_array_bytes,
+                        ),
+                    }
+                readout_comparisons[readout] = {
+                    "steady_runtime_ratio_modal_over_standard": _safe_ratio(
+                        modal_seconds,
+                        standard_seconds,
+                    ),
+                    "median_paired_repeat_ratio_modal_over_standard": (
+                        float(np.median(paired_ratios)) if paired_ratios else None
+                    ),
+                    "amortized_runtime_ratio_modal_over_standard": {
+                        str(count): _safe_ratio(
+                            modal_seconds + setup_seconds / count,
+                            standard_seconds,
+                        )
+                        for count in (1, 10, 100, 1_000)
+                    },
+                    "break_even_trajectories": break_even,
+                    "memory": memory_comparison,
+                }
+            comparisons.append(
+                {
+                    "regime": benchmark.regime,
+                    "n_nodes": benchmark.config.n_nodes,
+                    "n_steps": benchmark.config.n_steps,
+                    "dt": benchmark.config.dt,
+                    "total_time": float(benchmark.config.times[-1]),
+                    "ratio_direction": (
+                        "modal_over_standard; values above one mean modal is slower "
+                        "or uses more memory"
+                    ),
+                    "standard_median_seconds": standard_seconds,
+                    "modal_setup_median_seconds": setup_seconds,
+                    "readouts": readout_comparisons,
+                }
+            )
+
         return {
+            "schema_version": 2,
             "operating_point": self.operating_point,
             "study_contract": {
                 "output_workload": "full_field_every_timestep",
+                "common_time_grid": True,
+                "standard_comparator": (
+                    "exact aggregated multinomial node-count process with native "
+                    "integer full-field output"
+                ),
+                "standard_setup_applicable": False,
                 "operating_point_parameters_scale_with_nodes": True,
                 "fixed_steps": (
                     "fixed update count with a stability-limited timestep; "
@@ -427,7 +845,15 @@ class ComponentScalingBenchmark:
             },
             "configurations": [item.summary() for item in self.benchmarks],
             "memory_records": [item.as_dict() for item in self.memory_records],
+            "standard_comparators": [
+                item.summary() for item in standard_benchmarks
+            ],
+            "standard_memory_records": [
+                item.as_dict() for item in self.standard_memory_records
+            ],
+            "comparisons": comparisons,
             "scaling_slopes": slopes,
+            "standard_scaling_slopes": standard_slopes,
         }
 
 
@@ -441,6 +867,38 @@ def _log_log_slope(
     if np.count_nonzero(positive) < 2:
         return None
     return float(np.polyfit(np.log(x[positive]), np.log(y[positive]), 1)[0])
+
+
+def _safe_ratio(numerator: float | int, denominator: float | int) -> float | None:
+    if denominator <= 0:
+        return None
+    return float(numerator / denominator)
+
+
+def _balanced_execution_orders(
+    tasks: Sequence[tuple[str, str]],
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    """Return a repeatable schedule balanced for pairwise order by ten runs."""
+
+    values = tuple(tasks)
+    if len(values) == 3:
+        # Two Latin-square cycles cover all six permutations. The final four
+        # are two reverse pairs, so every task pair precedes each other five
+        # times over the default ten repeats.
+        index_orders = (
+            (0, 1, 2),
+            (1, 2, 0),
+            (2, 0, 1),
+            (2, 1, 0),
+            (0, 2, 1),
+            (1, 0, 2),
+            (0, 1, 2),
+            (2, 1, 0),
+            (1, 2, 0),
+            (0, 2, 1),
+        )
+        return tuple(tuple(values[index] for index in order) for order in index_orders)
+    return tuple(permutations(values))
 
 
 def _validate_arguments(
@@ -623,6 +1081,7 @@ def benchmark_full_field_components(
     trajectory_repeats: int = 10,
     warmup_runs: int = 1,
     seed: int = 0,
+    include_standard_comparator: bool = False,
 ) -> FullFieldComponentBenchmark:
     """Measure setup, trajectory, completion, and full-field readout costs."""
 
@@ -688,6 +1147,19 @@ def benchmark_full_field_components(
                 readout=readout,
                 seed=(seed, 0, warmup),
             )
+        if include_standard_comparator:
+            standard_warmup = multinomial_random_walk_diffusion(
+                config,
+                rng=np.random.default_rng(
+                    np.random.SeedSequence([seed, 0, 3, warmup])
+                ),
+            )
+            validate_full_field_output(
+                standard_warmup,
+                config,
+                require_integer=True,
+            )
+            del standard_warmup
 
     setup_array_bytes = deep_numpy_nbytes(pipeline)
     resident_array_bytes = setup_array_bytes
@@ -696,6 +1168,10 @@ def benchmark_full_field_components(
     diagnostic_accumulator: dict[str, list[dict[str, float]]] = {
         readout: [] for readout in selected_readouts
     }
+    standard_samples: list[StandardTimingSample] = []
+    standard_diagnostics: list[dict[str, float]] = []
+    standard_output_array_bytes = 0
+    standard_output_dtype = ""
 
     garbage_collection_enabled = gc.isenabled()
     if garbage_collection_enabled:
@@ -766,17 +1242,60 @@ def benchmark_full_field_components(
                     ),
                 )
 
-            total_order = list(selected_readouts)
-            if repeat % 2:
-                total_order.reverse()
-            for readout in total_order:
+            del raw, completed, additions, physical
+
+            total_tasks = [
+                ("completed_modal", readout) for readout in selected_readouts
+            ]
+            if include_standard_comparator:
+                total_tasks.append(
+                    (STANDARD_COMPARATOR_METHOD, STANDARD_COMPARATOR_VARIANT)
+                )
+            task_orders = _balanced_execution_orders(total_tasks)
+            total_tasks = list(task_orders[repeat % len(task_orders)])
+            for execution_position, (method, variant) in enumerate(total_tasks):
+                if method == STANDARD_COMPARATOR_METHOD:
+                    standard_sequence = np.random.SeedSequence([seed, 3, repeat])
+                    start = perf_counter()
+                    standard_counts = multinomial_random_walk_diffusion(
+                        config,
+                        rng=np.random.default_rng(standard_sequence),
+                    )
+                    total_seconds = perf_counter() - start
+                    validate_full_field_output(
+                        standard_counts,
+                        config,
+                        require_integer=True,
+                    )
+                    standard_samples.append(
+                        StandardTimingSample(
+                            repeat=repeat,
+                            seconds=total_seconds,
+                            execution_position=execution_position,
+                            seed_id=f"{seed}:3:{repeat}",
+                        )
+                    )
+                    standard_diagnostics.append(
+                        readout_constraint_diagnostics(
+                            standard_counts,
+                            config.n_particles,
+                        )
+                    )
+                    standard_output_array_bytes = max(
+                        standard_output_array_bytes,
+                        standard_counts.nbytes,
+                    )
+                    standard_output_dtype = str(standard_counts.dtype)
+                    del standard_counts
+                    continue
+
                 total_simulation_sequence, total_completion_sequence = (
                     np.random.SeedSequence([seed, 2, repeat]).spawn(2)
                 )
                 start = perf_counter()
                 physical = _execute_full_field_component_pipeline(
                     pipeline,
-                    readout=readout,
+                    readout=variant,  # type: ignore[arg-type]
                     simulation_sequence=total_simulation_sequence,
                     completion_sequence=total_completion_sequence,
                 )
@@ -784,20 +1303,23 @@ def benchmark_full_field_components(
                 validate_full_field_output(
                     physical.counts,
                     config,
-                    require_integer=readout == "delta_sigma_temporal",
+                    require_integer=variant == "delta_sigma_temporal",
                 )
                 samples.append(
                     ComponentTimingSample(
                         "trajectory_total",
                         repeat,
                         total_seconds,
-                        readout,
+                        variant,
+                        execution_position=execution_position,
+                        seed_id=f"{seed}:2:{repeat}",
                     )
                 )
                 resident_array_bytes = max(
                     resident_array_bytes,
                     deep_numpy_nbytes((pipeline, physical)),
                 )
+                del physical
     finally:
         if garbage_collection_enabled:
             gc.enable()
@@ -808,6 +1330,24 @@ def benchmark_full_field_components(
             key: float(max(item[key] for item in diagnostics))
             for key in diagnostics[0]
         }
+
+    standard_benchmark: StandardSimulationBenchmark | None = None
+    if include_standard_comparator:
+        standard_constraints = {
+            key: float(max(item[key] for item in standard_diagnostics))
+            for key in standard_diagnostics[0]
+        }
+        standard_benchmark = StandardSimulationBenchmark(
+            config=config,
+            regime=regime,
+            trajectory_repeats=trajectory_repeats,
+            warmup_runs=warmup_runs,
+            seed=seed,
+            samples=tuple(standard_samples),
+            output_array_bytes=standard_output_array_bytes,
+            output_dtype=standard_output_dtype,
+            constraint_diagnostics=standard_constraints,
+        )
 
     return FullFieldComponentBenchmark(
         config=config,
@@ -827,6 +1367,7 @@ def benchmark_full_field_components(
         output_array_bytes=output_array_bytes,
         output_dtype=output_dtype,
         constraint_diagnostics=constraints,
+        standard_benchmark=standard_benchmark,
     )
 
 
@@ -882,43 +1423,18 @@ def _read_process_rss_bytes(process_id: int) -> int:
         return 0
 
 
-def measure_component_memory(
-    config: DiffusionConfig,
+def _run_synchronized_memory_worker(
+    spec: dict[str, object],
     *,
-    regime: ComponentBenchmarkRegime,
-    operating_point: str,
-    retained_modes: int,
-    handoff_time: float,
-    completion_rank: int,
-    completion_ridge: float,
-    readout: ComponentReadoutName,
-    seed: int,
-    sampler_interval_ms: float = 1.0,
-    worker_timeout_seconds: float = 300.0,
-) -> ComponentMemoryRecord:
-    """Measure setup and trajectory RSS in a synchronized fresh subprocess."""
+    sampler_interval_ms: float,
+    worker_timeout_seconds: float,
+) -> tuple[
+    dict[str, dict[str, object]],
+    dict[str, int],
+    dict[str, int],
+]:
+    """Run the shared memory worker and sample phase-local current RSS."""
 
-    if sampler_interval_ms <= 0.0:
-        raise ValueError("sampler_interval_ms must be positive")
-    if worker_timeout_seconds <= 0.0:
-        raise ValueError("worker_timeout_seconds must be positive")
-    spec = {
-        "config": {
-            "n_particles": config.n_particles,
-            "n_nodes": config.n_nodes,
-            "n_steps": config.n_steps,
-            "impulse_index": config.impulse_index,
-            "dt": config.dt,
-            "length": config.length,
-            "diffusion_coefficient": config.diffusion_coefficient,
-        },
-        "retained_modes": retained_modes,
-        "handoff_time": handoff_time,
-        "completion_rank": completion_rank,
-        "completion_ridge": completion_ridge,
-        "readout": readout,
-        "seed": seed,
-    }
     environment = os.environ.copy()
     for variable in (
         "OPENBLAS_NUM_THREADS",
@@ -1050,6 +1566,52 @@ def measure_component_memory(
     missing = required - set(messages)
     if missing:
         raise RuntimeError(f"component-memory worker omitted events: {sorted(missing)}")
+    return messages, phase_peaks, phase_samples
+
+
+def measure_component_memory(
+    config: DiffusionConfig,
+    *,
+    regime: ComponentBenchmarkRegime,
+    operating_point: str,
+    retained_modes: int,
+    handoff_time: float,
+    completion_rank: int,
+    completion_ridge: float,
+    readout: ComponentReadoutName,
+    seed: int,
+    sampler_interval_ms: float = 1.0,
+    worker_timeout_seconds: float = 300.0,
+) -> ComponentMemoryRecord:
+    """Measure setup and trajectory RSS in a synchronized fresh subprocess."""
+
+    if sampler_interval_ms <= 0.0:
+        raise ValueError("sampler_interval_ms must be positive")
+    if worker_timeout_seconds <= 0.0:
+        raise ValueError("worker_timeout_seconds must be positive")
+    spec = {
+        "config": {
+            "n_particles": config.n_particles,
+            "n_nodes": config.n_nodes,
+            "n_steps": config.n_steps,
+            "impulse_index": config.impulse_index,
+            "dt": config.dt,
+            "length": config.length,
+            "diffusion_coefficient": config.diffusion_coefficient,
+        },
+        "retained_modes": retained_modes,
+        "handoff_time": handoff_time,
+        "completion_rank": completion_rank,
+        "completion_ridge": completion_ridge,
+        "readout": readout,
+        "seed": seed,
+    }
+    spec["method"] = "completed_modal"
+    messages, phase_peaks, phase_samples = _run_synchronized_memory_worker(
+        spec,
+        sampler_interval_ms=sampler_interval_ms,
+        worker_timeout_seconds=worker_timeout_seconds,
+    )
     ready = messages["ready"]
     setup = messages["setup_end"]
     trajectory = messages["trajectory_end"]
@@ -1083,6 +1645,71 @@ def measure_component_memory(
     )
 
 
+def measure_standard_comparator_memory(
+    config: DiffusionConfig,
+    *,
+    regime: ComponentBenchmarkRegime,
+    operating_point: str,
+    seed: int,
+    sampler_interval_ms: float = 1.0,
+    worker_timeout_seconds: float = 300.0,
+) -> StandardSimulationMemoryRecord:
+    """Measure native aggregated-random-walk memory in a fresh process."""
+
+    if sampler_interval_ms <= 0.0:
+        raise ValueError("sampler_interval_ms must be positive")
+    if worker_timeout_seconds <= 0.0:
+        raise ValueError("worker_timeout_seconds must be positive")
+    spec: dict[str, object] = {
+        "method": STANDARD_COMPARATOR_METHOD,
+        "config": {
+            "n_particles": config.n_particles,
+            "n_nodes": config.n_nodes,
+            "n_steps": config.n_steps,
+            "impulse_index": config.impulse_index,
+            "dt": config.dt,
+            "length": config.length,
+            "diffusion_coefficient": config.diffusion_coefficient,
+        },
+        "seed": seed,
+    }
+    messages, phase_peaks, phase_samples = _run_synchronized_memory_worker(
+        spec,
+        sampler_interval_ms=sampler_interval_ms,
+        worker_timeout_seconds=worker_timeout_seconds,
+    )
+    ready = messages["ready"]
+    setup = messages["setup_end"]
+    trajectory = messages["trajectory_end"]
+    return StandardSimulationMemoryRecord(
+        regime=regime,
+        operating_point=operating_point,
+        method=STANDARD_COMPARATOR_METHOD,
+        variant=STANDARD_COMPARATOR_VARIANT,
+        n_particles=config.n_particles,
+        n_nodes=config.n_nodes,
+        n_steps=config.n_steps,
+        dt=config.dt,
+        total_time=float(config.times[-1]),
+        setup_applicable=False,
+        baseline_rss_bytes=int(ready["rss_bytes"]),
+        baseline_peak_rss_bytes=int(ready["hwm_bytes"]),
+        setup_peak_rss_bytes=phase_peaks["setup"],
+        steady_setup_rss_bytes=int(setup["rss_bytes"]),
+        process_peak_after_setup_rss_bytes=int(setup["hwm_bytes"]),
+        trajectory_peak_rss_bytes=phase_peaks["trajectory"],
+        process_peak_after_trajectory_rss_bytes=int(trajectory["hwm_bytes"]),
+        final_rss_bytes=int(trajectory["rss_bytes"]),
+        setup_array_bytes=int(setup["setup_array_bytes"]),
+        resident_array_bytes=int(trajectory["resident_array_bytes"]),
+        output_array_bytes=int(trajectory["output_array_bytes"]),
+        returned_result_array_bytes=int(trajectory["returned_result_array_bytes"]),
+        transient_core_array_bytes=int(trajectory["transient_core_array_bytes"]),
+        output_dtype=str(trajectory["output_dtype"]),
+        setup_phase_samples=phase_samples["setup"],
+        trajectory_phase_samples=phase_samples["trajectory"],
+        sampler_interval_ms=sampler_interval_ms,
+    )
 def benchmark_component_scaling(
     *,
     node_counts: Sequence[int] = (51, 101, 151, 201),
@@ -1104,6 +1731,7 @@ def benchmark_component_scaling(
     seed: int = 0,
     isolate_memory: bool = True,
     memory_sampler_interval_ms: float = 1.0,
+    include_standard_comparator: bool = True,
 ) -> ComponentScalingBenchmark:
     """Benchmark the selected pipeline in fixed-step and fixed-duration regimes."""
 
@@ -1115,6 +1743,7 @@ def benchmark_component_scaling(
     point = _selected_operating_point(operating_point)
     benchmarks: list[FullFieldComponentBenchmark] = []
     memories: list[ComponentMemoryRecord] = []
+    standard_memories: list[StandardSimulationMemoryRecord] = []
     for regime_index, regime in enumerate(dict.fromkeys(regimes)):
         for n_nodes in sorted(set(int(value) for value in node_counts)):
             if regime == "fixed_steps":
@@ -1156,6 +1785,7 @@ def benchmark_component_scaling(
                 trajectory_repeats=trajectory_repeats,
                 warmup_runs=warmup_runs,
                 seed=configuration_seed,
+                include_standard_comparator=include_standard_comparator,
             )
             benchmarks.append(benchmark)
             if isolate_memory:
@@ -1174,10 +1804,21 @@ def benchmark_component_scaling(
                             sampler_interval_ms=memory_sampler_interval_ms,
                         )
                     )
+                if include_standard_comparator:
+                    standard_memories.append(
+                        measure_standard_comparator_memory(
+                            config,
+                            regime=regime,
+                            operating_point=operating_point,
+                            seed=configuration_seed + 10_000,
+                            sampler_interval_ms=memory_sampler_interval_ms,
+                        )
+                    )
     return ComponentScalingBenchmark(
         operating_point=operating_point,
         benchmarks=tuple(benchmarks),
         memory_records=tuple(memories),
+        standard_memory_records=tuple(standard_memories),
     )
 
 
@@ -1220,13 +1861,14 @@ def write_component_scaling_csv(
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    rows = [
-        row
-        for benchmark in scaling.benchmarks
-        for row in benchmark.sample_rows()
-    ]
+    rows: list[dict[str, str | int | float]] = []
+    for benchmark in scaling.benchmarks:
+        rows.extend(benchmark.sample_rows())
+        if benchmark.standard_benchmark is not None:
+            rows.extend(benchmark.standard_benchmark.sample_rows())
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
     return path
@@ -1241,11 +1883,13 @@ def write_component_memory_csv(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [record.as_dict() for record in scaling.memory_records]
+    rows.extend(record.as_dict() for record in scaling.standard_memory_records)
     if not rows:
         path.write_text("", encoding="utf-8")
         return path
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
     return path

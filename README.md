@@ -153,6 +153,12 @@ fixed, so finer grids may require more stable updates. Timing samples and
 fresh-process RSS measurements are written separately to
 `scaling_samples.csv` and `scaling_memory.csv`; `scaling_summary.json` combines
 their scaling slopes without adding memory-sampling overhead to timed runs.
+By default, the study also interleaves the exact aggregated multinomial random
+walk on every configuration. It natively returns the required integer
+full-field output, so no artificial readout cost is added. Rows are identified
+by `pipeline` and the summary reports completed-modal/standard runtime and
+memory ratios, including setup amortization and finite break-even counts. Pass
+`--no-include-standard-comparator` to run only the component study.
 
 Three staged scaling drivers live under `examples/`:
 

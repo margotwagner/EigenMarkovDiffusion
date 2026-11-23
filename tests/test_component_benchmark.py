@@ -11,10 +11,13 @@ from eigendiffusion.component_benchmark import (
     build_full_field_component_pipeline,
     fixed_step_component_config,
     measure_component_memory,
+    measure_standard_comparator_memory,
     run_full_field_component_pipeline,
     validate_full_field_output,
     write_component_benchmark_csv,
     write_component_benchmark_summary,
+    write_component_memory_csv,
+    write_component_scaling_csv,
     write_component_scaling_summary,
 )
 from eigendiffusion.config import DiffusionConfig
@@ -198,15 +201,70 @@ def test_component_scaling_runs_two_node_counts_and_reports_slopes(tmp_path) -> 
 
     summary = scaling.summary()
     assert summary["operating_point"] == "accuracy_first"
+    assert summary["schema_version"] == 2
     assert len(summary["configurations"]) == 4
     assert summary["memory_records"] == []
+    assert len(summary["standard_comparators"]) == 4
+    assert summary["standard_memory_records"] == []
+    assert len(summary["comparisons"]) == 4
     assert set(summary["scaling_slopes"]) == {"fixed_steps", "fixed_duration"}
+    assert set(summary["standard_scaling_slopes"]) == {
+        "fixed_steps",
+        "fixed_duration",
+    }
     for regime in ("fixed_steps", "fixed_duration"):
         slopes = summary["scaling_slopes"][regime]
         assert "setup_total" in slopes
         assert "trajectory_total:simplex_bank" in slopes
         assert np.isfinite(slopes["setup_array_bytes"])
         assert slopes["output_array_bytes"] == pytest.approx(1.0)
+
+    for standard in summary["standard_comparators"]:
+        assert standard["configuration"]["setup_applicable"] is False
+        assert standard["memory"]["output_dtype"] == "int64"
+        assert standard["constraints"]["noninteger_entry_fraction"] == 0.0
+        assert standard["constraints"]["maximum_instantaneous_mass_error"] == 0.0
+    for comparison in summary["comparisons"]:
+        for readout in ("simplex_bank",):
+            readout_comparison = comparison["readouts"][readout]
+            ratio = readout_comparison[
+                "steady_runtime_ratio_modal_over_standard"
+            ]
+            assert ratio > 0.0
+            configuration = next(
+                item
+                for item in summary["configurations"]
+                if item["configuration"]["regime"] == comparison["regime"]
+                and item["configuration"]["n_nodes"] == comparison["n_nodes"]
+            )
+            modal_seconds = configuration["readouts"][readout][
+                "measured_end_to_end_seconds"
+            ]
+            setup_seconds = configuration["components"]["setup_total"][
+                "median_seconds"
+            ]
+            expected = (modal_seconds + setup_seconds / 10) / comparison[
+                "standard_median_seconds"
+            ]
+            assert readout_comparison[
+                "amortized_runtime_ratio_modal_over_standard"
+            ]["10"] == pytest.approx(expected)
+
+    samples_path = write_component_scaling_csv(
+        scaling,
+        tmp_path / "scaling_samples.csv",
+    )
+    memory_path = write_component_memory_csv(
+        scaling,
+        tmp_path / "scaling_memory.csv",
+    )
+    with samples_path.open(newline="", encoding="utf-8") as handle:
+        sample_rows = list(csv.DictReader(handle))
+    assert {row["pipeline"] for row in sample_rows} == {
+        "completed_modal",
+        "aggregated_multinomial",
+    }
+    assert memory_path.read_text(encoding="utf-8") == ""
 
     summary_path = write_component_scaling_summary(
         scaling,
@@ -224,6 +282,7 @@ def test_component_scaling_parser_defaults_and_memory_toggle() -> None:
     assert defaults.operating_point == "accuracy_first"
     assert defaults.steps == 101
     assert defaults.isolate_memory is True
+    assert defaults.include_standard_comparator is True
 
     custom = build_parser().parse_args(
         [
@@ -236,12 +295,37 @@ def test_component_scaling_parser_defaults_and_memory_toggle() -> None:
             "--operating-point",
             "balanced",
             "--no-isolate-memory",
+            "--no-include-standard-comparator",
         ]
     )
     assert custom.node_counts == [7, 9]
     assert custom.regimes == ["fixed_steps"]
     assert custom.operating_point == "balanced"
     assert custom.isolate_memory is False
+    assert custom.include_standard_comparator is False
+
+
+def test_component_scaling_can_disable_standard_comparator() -> None:
+    scaling = benchmark_component_scaling(
+        node_counts=(7,),
+        regimes=("fixed_steps",),
+        n_particles=40,
+        fixed_steps=5,
+        requested_dt=0.2,
+        readouts=("simplex_bank",),
+        setup_repeats=1,
+        trajectory_repeats=1,
+        warmup_runs=0,
+        isolate_memory=False,
+        include_standard_comparator=False,
+    )
+
+    assert scaling.benchmarks[0].standard_benchmark is None
+    summary = scaling.summary()
+    assert summary["standard_comparators"] == []
+    assert summary["standard_memory_records"] == []
+    assert summary["comparisons"] == []
+    assert summary["standard_scaling_slopes"] == {}
 
 
 def test_isolated_memory_worker_reports_phase_and_logical_memory() -> None:
@@ -273,4 +357,84 @@ def test_isolated_memory_worker_reports_phase_and_logical_memory() -> None:
     assert record.setup_peak_incremental_bytes == max(
         0,
         record.setup_peak_rss_bytes - record.baseline_rss_bytes,
+    )
+
+
+def test_standard_comparator_is_interleaved_and_satisfies_native_contract() -> None:
+    benchmark = benchmark_full_field_components(
+        _tiny_config(),
+        retained_modes=4,
+        handoff_time=0.4,
+        completion_rank=1,
+        readouts=("simplex_bank", "delta_sigma_temporal"),
+        setup_repeats=1,
+        trajectory_repeats=10,
+        warmup_runs=1,
+        seed=21,
+        include_standard_comparator=True,
+    )
+
+    standard = benchmark.standard_benchmark
+    assert standard is not None
+    assert len(standard.samples) == 10
+    assert {sample.execution_position for sample in standard.samples} == {0, 1, 2}
+    assert standard.output_array_bytes == 5 * 7 * np.dtype(np.int64).itemsize
+    assert standard.output_dtype == "int64"
+    assert standard.constraint_diagnostics["noninteger_entry_fraction"] == 0.0
+    assert standard.constraint_diagnostics["maximum_instantaneous_mass_error"] == 0.0
+
+    modal_positions = {
+        sample.repeat: sample.execution_position
+        for sample in benchmark.samples
+        if sample.component == "trajectory_total"
+        and sample.readout == "simplex_bank"
+    }
+    assert set(modal_positions) == set(range(10))
+    assert set(modal_positions.values()) == {0, 1, 2}
+
+    orders: dict[int, list[tuple[int, str]]] = {
+        repeat: [] for repeat in range(10)
+    }
+    for sample in standard.samples:
+        orders[sample.repeat].append(
+            (sample.execution_position, "aggregated_multinomial")
+        )
+    for sample in benchmark.samples:
+        if sample.component == "trajectory_total":
+            orders[sample.repeat].append((sample.execution_position, sample.readout))
+    ordered_names = {
+        repeat: [name for _, name in sorted(values)]
+        for repeat, values in orders.items()
+    }
+    for readout in ("simplex_bank", "delta_sigma_temporal"):
+        standard_precedes = sum(
+            names.index("aggregated_multinomial") < names.index(readout)
+            for names in ordered_names.values()
+        )
+        assert standard_precedes == 5
+
+
+def test_isolated_standard_comparator_memory_worker() -> None:
+    config = _tiny_config()
+    record = measure_standard_comparator_memory(
+        config,
+        regime="fixed_steps",
+        operating_point="accuracy_first",
+        seed=23,
+    )
+
+    expected_bytes = 5 * 7 * np.dtype(np.int64).itemsize
+    assert record.method == "aggregated_multinomial"
+    assert record.variant == "native_integer_counts"
+    assert record.setup_applicable is False
+    assert record.setup_array_bytes == 0
+    assert record.resident_array_bytes == expected_bytes
+    assert record.output_array_bytes == expected_bytes
+    assert record.returned_result_array_bytes == expected_bytes
+    assert record.transient_core_array_bytes == expected_bytes + 7 * 8
+    assert record.output_dtype == "int64"
+    assert record.process_peak_after_setup_rss_bytes >= record.baseline_peak_rss_bytes
+    assert (
+        record.process_peak_after_trajectory_rss_bytes
+        >= record.process_peak_after_setup_rss_bytes
     )

@@ -9,8 +9,10 @@ import sys
 
 import numpy as np
 
+from .baselines import multinomial_random_walk_diffusion
 from .benchmarking import deep_numpy_nbytes
 from .component_benchmark import (
+    STANDARD_COMPARATOR_METHOD,
     _apply_readout,
     build_full_field_component_pipeline,
     validate_full_field_output,
@@ -39,60 +41,95 @@ def _wait_for_parent() -> None:
 
 def run_worker(spec: dict[str, object]) -> None:
     config = DiffusionConfig(**spec["config"])
-    readout = str(spec["readout"])
+    method = str(spec.get("method", "completed_modal"))
     gc.collect()
     rss, hwm = _memory_status()
-    _emit("ready", rss_bytes=rss, hwm_bytes=hwm)
+    _emit("ready", rss_bytes=rss, hwm_bytes=hwm, method=method)
     _wait_for_parent()
 
     _emit("setup_start")
     _wait_for_parent()
-    pipeline = build_full_field_component_pipeline(
-        config,
-        retained_modes=int(spec["retained_modes"]),
-        handoff_time=float(spec["handoff_time"]),
-        completion_rank=int(spec["completion_rank"]),
-        completion_ridge=float(spec["completion_ridge"]),
-    )
+    if method == STANDARD_COMPARATOR_METHOD:
+        pipeline = None
+        setup_array_bytes = 0
+        handoff_time = None
+    elif method == "completed_modal":
+        pipeline = build_full_field_component_pipeline(
+            config,
+            retained_modes=int(spec["retained_modes"]),
+            handoff_time=float(spec["handoff_time"]),
+            completion_rank=int(spec["completion_rank"]),
+            completion_ridge=float(spec["completion_ridge"]),
+        )
+        setup_array_bytes = deep_numpy_nbytes(pipeline)
+        handoff_time = pipeline.simulator.handoff_time
+    else:
+        raise ValueError(f"unknown memory-worker method: {method}")
     gc.collect()
     rss, hwm = _memory_status()
     _emit(
         "setup_end",
         rss_bytes=rss,
         hwm_bytes=hwm,
-        handoff_time=pipeline.simulator.handoff_time,
-        setup_array_bytes=deep_numpy_nbytes(pipeline),
+        handoff_time=handoff_time,
+        setup_array_bytes=setup_array_bytes,
+        setup_applicable=method != STANDARD_COMPARATOR_METHOD,
     )
     _wait_for_parent()
 
     _emit("trajectory_start")
     _wait_for_parent()
-    simulation_sequence, completion_sequence = np.random.SeedSequence(
-        int(spec["seed"])
-    ).spawn(2)
-    raw = pipeline.simulator.run(rng=np.random.default_rng(simulation_sequence))
-    completed, additions = pipeline.completer.complete(
-        raw.spatial_counts,
-        rng=np.random.default_rng(completion_sequence),
-    )
-    physical = _apply_readout(completed, config.n_particles, readout)
+    if method == STANDARD_COMPARATOR_METHOD:
+        counts = multinomial_random_walk_diffusion(
+            config,
+            rng=np.random.default_rng(int(spec["seed"])),
+        )
+        resident_array_bytes = counts.nbytes
+        output_array_bytes = counts.nbytes
+        returned_result_array_bytes = counts.nbytes
+        transient_core_array_bytes = counts.nbytes + config.n_nodes * 8
+        output_dtype = str(counts.dtype)
+    else:
+        if pipeline is None:  # pragma: no cover - guarded by method branch
+            raise RuntimeError("completed modal worker omitted its pipeline")
+        readout = str(spec["readout"])
+        simulation_sequence, completion_sequence = np.random.SeedSequence(
+            int(spec["seed"])
+        ).spawn(2)
+        raw = pipeline.simulator.run(rng=np.random.default_rng(simulation_sequence))
+        completed, additions = pipeline.completer.complete(
+            raw.spatial_counts,
+            rng=np.random.default_rng(completion_sequence),
+        )
+        physical = _apply_readout(completed, config.n_particles, readout)
+        counts = physical.counts
+        resident_array_bytes = deep_numpy_nbytes(
+            (pipeline, raw, completed, additions, physical)
+        )
+        output_array_bytes = physical.counts.nbytes
+        returned_result_array_bytes = deep_numpy_nbytes(physical)
+        transient_core_array_bytes = 0
+        output_dtype = str(physical.counts.dtype)
     rss, hwm = _memory_status()
     _emit(
         "trajectory_end",
         rss_bytes=rss,
         hwm_bytes=hwm,
-        resident_array_bytes=deep_numpy_nbytes(
-            (pipeline, raw, completed, additions, physical)
-        ),
-        output_array_bytes=physical.counts.nbytes,
-        returned_result_array_bytes=deep_numpy_nbytes(physical),
+        resident_array_bytes=resident_array_bytes,
+        output_array_bytes=output_array_bytes,
+        returned_result_array_bytes=returned_result_array_bytes,
+        transient_core_array_bytes=transient_core_array_bytes,
+        output_dtype=output_dtype,
     )
     _wait_for_parent()
 
     validate_full_field_output(
-        physical.counts,
+        counts,
         config,
-        require_integer=readout == "delta_sigma_temporal",
+        require_integer=(
+            method == STANDARD_COMPARATOR_METHOD
+            or str(spec["readout"]) == "delta_sigma_temporal"
+        ),
     )
     _emit("done")
 

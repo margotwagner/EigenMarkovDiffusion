@@ -1979,6 +1979,7 @@ def run_component_scaling_benchmark(args: argparse.Namespace) -> int:
         seed=args.seed,
         isolate_memory=args.isolate_memory,
         memory_sampler_interval_ms=args.memory_sampler_interval_ms,
+        include_standard_comparator=args.include_standard_comparator,
     )
     timing_path = write_component_scaling_csv(scaling, args.csv_output)
     memory_path = write_component_memory_csv(scaling, args.memory_output)
@@ -1993,8 +1994,11 @@ def run_component_scaling_benchmark(args: argparse.Namespace) -> int:
             "setup_repeats": args.setup_repeats,
             "trajectory_repeats": args.repeats,
             "isolate_memory": args.isolate_memory,
+            "include_standard_comparator": args.include_standard_comparator,
         },
         "scaling_slopes": summary["scaling_slopes"],
+        "standard_scaling_slopes": summary["standard_scaling_slopes"],
+        "comparisons": summary["comparisons"],
         "artifacts": {
             "samples_csv": str(timing_path),
             "memory_csv": str(memory_path),
@@ -3426,6 +3430,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--isolate-memory",
         action=argparse.BooleanOptionalAction,
         default=True,
+    )
+    component_scaling.add_argument(
+        "--include-standard-comparator",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Include the exact aggregated multinomial random walk on the same "
+            "time grids and full-field output contract."
+        ),
     )
     component_scaling.add_argument(
         "--memory-sampler-interval-ms",
