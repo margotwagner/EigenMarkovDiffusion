@@ -207,6 +207,51 @@ def test_persistent_completion_rank_is_capped() -> None:
     assert completer.completion_rank == 1
 
 
+def test_persistent_completion_counts_only_matches_detailed_path() -> None:
+    config = DiffusionConfig(
+        n_particles=200,
+        n_nodes=11,
+        n_steps=8,
+        impulse_index=5,
+        dt=1.0,
+        length=4.0,
+        diffusion_coefficient=2.20e-4,
+    )
+    raw = run_modal_ensemble(
+        config,
+        n_runs=1,
+        model="handoff_correlated_modal",
+        n_modes=6,
+        initial_n_modes=config.n_nodes,
+        handoff_time=2.0,
+        seed=17,
+    ).runs[0]
+    completer = PersistentUnresolvedGaussianCompleter(
+        config,
+        retained_modes=6,
+        completion_start_time=2.0,
+        completion_rank=2,
+    )
+
+    detailed, additions = completer.complete(raw, rng=np.random.default_rng(18))
+    counts_only = completer.complete_counts(raw, rng=np.random.default_rng(18))
+    retained = raw @ completer.retained_basis.eigenvectors
+    supplied_retained = completer.complete_counts(
+        raw,
+        rng=np.random.default_rng(18),
+        retained_states=retained,
+    )
+
+    np.testing.assert_allclose(counts_only, detailed, rtol=0.0, atol=1.0e-12)
+    np.testing.assert_allclose(
+        supplied_retained,
+        detailed,
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(additions.sum(axis=1), 0.0, atol=1.0e-12)
+
+
 def test_captured_variance_rank_is_minimal_and_reports_cap_failure() -> None:
     config = DiffusionConfig(
         n_particles=100,

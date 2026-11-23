@@ -33,45 +33,9 @@ from numpy.typing import NDArray
 
 from .config import DiffusionConfig
 from .operators import Eigenbasis, eigendecompose, impulse_initial_condition, neumann_laplacian_1d
+from .simplex import _project_to_mass_simplex_prevalidated, project_to_mass_simplex
 
 FloatArray = NDArray[np.float64]
-
-
-def project_to_mass_simplex(values: FloatArray, total_mass: float) -> FloatArray:
-    """Euclidean projection onto ``x >= 0`` and ``sum(x) = total_mass``.
-
-    This is the standard sorting-based simplex projection. It preserves the
-    requested total mass to floating-point precision and is the projection
-    used by the banked model.
-    """
-
-    vector = np.asarray(values, dtype=float)
-    if vector.ndim != 1:
-        raise ValueError("values must be one-dimensional")
-    if total_mass <= 0:
-        raise ValueError("total_mass must be positive")
-    if not np.all(np.isfinite(vector)):
-        raise ValueError("values must be finite")
-
-    sorted_values = np.sort(vector)[::-1]
-    cumulative = np.cumsum(sorted_values) - total_mass
-    indices = np.arange(1, vector.size + 1, dtype=float)
-    positive = sorted_values - cumulative / indices > 0.0
-    if not np.any(positive):
-        # This branch is mathematically unreachable for positive total_mass,
-        # but retaining it gives a clear failure mode for corrupted inputs.
-        raise RuntimeError("simplex projection failed to find an active set")
-    rho = int(np.nonzero(positive)[0][-1])
-    threshold = cumulative[rho] / float(rho + 1)
-    projected = np.maximum(vector - threshold, 0.0)
-
-    # Correct the final few ulps on one active coordinate so downstream mass
-    # tests can use a tight tolerance without changing the projection.
-    residual = total_mass - float(projected.sum())
-    if abs(residual) > 0.0:
-        active = int(np.argmax(projected))
-        projected[active] += residual
-    return projected
 
 
 def nearest_neighbour_transition_covariance(
@@ -118,6 +82,142 @@ def nearest_neighbour_transition_covariance(
     return covariance
 
 
+class _NearestNeighbourGaussianWorkspace:
+    """Scratch arrays reused by a prepared nearest-neighbour sampler."""
+
+    __slots__ = (
+        "boundary_correction",
+        "interior",
+        "interior_correction",
+        "interior_mass_sqrt",
+        "interior_sums",
+        "left",
+        "noise",
+        "right",
+    )
+
+    def __init__(self, n_nodes: int) -> None:
+        n_interior = max(n_nodes - 2, 0)
+        self.noise = np.empty(n_nodes, dtype=float)
+        self.left = np.empty(2, dtype=float)
+        self.interior = np.empty((n_interior, 3), dtype=float)
+        self.right = np.empty(2, dtype=float)
+        self.boundary_correction = np.empty(2, dtype=float)
+        self.interior_sums = np.empty(n_interior, dtype=float)
+        self.interior_correction = np.empty((n_interior, 3), dtype=float)
+        self.interior_mass_sqrt = np.empty(n_interior, dtype=float)
+
+
+class _PreparedNearestNeighbourGaussianSampler:
+    """Nearest-neighbour Gaussian sampler with cached transition factors.
+
+    Transition probabilities and their square roots are fixed by the grid and
+    timestep, so simulators prepare them once. Scratch storage remains local
+    to each run, which permits concurrent calls to one simulator instance.
+    """
+
+    __slots__ = (
+        "_interior_probabilities",
+        "_interior_probability_sqrt",
+        "_left_probabilities",
+        "_left_probability_sqrt",
+        "_n_nodes",
+        "_right_probabilities",
+        "_right_probability_sqrt",
+    )
+
+    def __init__(self, n_nodes: int, jump_probability: float) -> None:
+        if n_nodes < 2:
+            raise ValueError("n_nodes must be at least 2")
+        if not 0.0 <= jump_probability <= 0.5 + 1e-12:
+            raise ValueError("jump_probability must lie in [0, 0.5]")
+
+        p = float(jump_probability)
+        self._n_nodes = int(n_nodes)
+        self._left_probabilities = np.asarray([1.0 - p, p], dtype=float)
+        self._interior_probabilities = np.asarray([p, 1.0 - 2.0 * p, p], dtype=float)
+        self._right_probabilities = np.asarray([p, 1.0 - p], dtype=float)
+        self._left_probability_sqrt = np.sqrt(self._left_probabilities)
+        self._interior_probability_sqrt = np.sqrt(self._interior_probabilities)
+        self._right_probability_sqrt = np.sqrt(self._right_probabilities)
+
+    def new_workspace(self) -> _NearestNeighbourGaussianWorkspace:
+        """Allocate scratch storage for one simulation run."""
+
+        return _NearestNeighbourGaussianWorkspace(self._n_nodes)
+
+    def sample(
+        self,
+        source_counts: FloatArray,
+        rng: np.random.Generator,
+        workspace: _NearestNeighbourGaussianWorkspace,
+    ) -> FloatArray:
+        """Sample into ``workspace`` while preserving the legacy RNG stream."""
+
+        counts = np.asarray(source_counts, dtype=float)
+        noise = workspace.noise
+        noise.fill(0.0)
+
+        # Preserve the original left/interior/right draw order and shapes.
+        left = workspace.left
+        rng.standard_normal(out=left)
+        np.multiply(self._left_probability_sqrt, left, out=left)
+        left_sum = float(left.sum())
+        np.multiply(
+            self._left_probabilities,
+            left_sum,
+            out=workspace.boundary_correction,
+        )
+        np.subtract(left, workspace.boundary_correction, out=left)
+        np.multiply(np.sqrt(float(counts[0])), left, out=left)
+        noise[0] += left[0]
+        noise[1] += left[1]
+
+        if self._n_nodes > 2:
+            interior = workspace.interior
+            rng.standard_normal(out=interior)
+            np.multiply(
+                self._interior_probability_sqrt[None, :],
+                interior,
+                out=interior,
+            )
+            np.sum(interior, axis=1, out=workspace.interior_sums)
+            np.multiply(
+                self._interior_probabilities[None, :],
+                workspace.interior_sums[:, None],
+                out=workspace.interior_correction,
+            )
+            np.subtract(interior, workspace.interior_correction, out=interior)
+            np.sqrt(counts[1:-1], out=workspace.interior_mass_sqrt)
+            np.multiply(
+                workspace.interior_mass_sqrt[:, None],
+                interior,
+                out=interior,
+            )
+            noise[:-2] += interior[:, 0]
+            noise[1:-1] += interior[:, 1]
+            noise[2:] += interior[:, 2]
+
+        right = workspace.right
+        rng.standard_normal(out=right)
+        np.multiply(self._right_probability_sqrt, right, out=right)
+        right_sum = float(right.sum())
+        np.multiply(
+            self._right_probabilities,
+            right_sum,
+            out=workspace.boundary_correction,
+        )
+        np.subtract(right, workspace.boundary_correction, out=right)
+        np.multiply(np.sqrt(float(counts[-1])), right, out=right)
+        noise[-2] += right[0]
+        noise[-1] += right[1]
+
+        # Every source-level categorical fluctuation is zero sum. Remove only
+        # floating-point accumulation error from the final field.
+        noise[-1] -= float(noise.sum())
+        return noise
+
+
 def sample_nearest_neighbour_gaussian_noise(
     source_counts: FloatArray,
     jump_probability: float,
@@ -154,51 +254,11 @@ def sample_nearest_neighbour_gaussian_noise(
         raise ValueError("jump_probability must lie in [0, 0.5]")
 
     counts = np.clip(counts, 0.0, None)
-    p = float(jump_probability)
-    noise = np.zeros_like(counts)
-    n_nodes = counts.size
-
-    def local_noise(mass: FloatArray, probabilities: FloatArray) -> FloatArray:
-        """Vectorized categorical covariance sampler for one or many sources."""
-
-        probabilities = np.asarray(probabilities, dtype=float)
-        if mass.ndim == 0:
-            z = rng.standard_normal(probabilities.size)
-            weighted = np.sqrt(probabilities) * z
-            return np.sqrt(float(mass)) * (
-                weighted - probabilities * float(weighted.sum())
-            )
-
-        z = rng.standard_normal((mass.size, probabilities.size))
-        weighted = np.sqrt(probabilities)[None, :] * z
-        return np.sqrt(mass)[:, None] * (
-            weighted - probabilities[None, :] * weighted.sum(axis=1, keepdims=True)
-        )
-
-    # Left reflecting boundary: stay or move right.
-    left = local_noise(np.asarray(counts[0]), np.asarray([1.0 - p, p]))
-    noise[0] += left[0]
-    noise[1] += left[1]
-
-    # Interior nodes: move left, stay, or move right.
-    if n_nodes > 2:
-        interior = local_noise(
-            counts[1:-1],
-            np.asarray([p, 1.0 - 2.0 * p, p]),
-        )
-        noise[:-2] += interior[:, 0]
-        noise[1:-1] += interior[:, 1]
-        noise[2:] += interior[:, 2]
-
-    # Right reflecting boundary: move left or stay.
-    right = local_noise(np.asarray(counts[-1]), np.asarray([p, 1.0 - p]))
-    noise[-2] += right[0]
-    noise[-1] += right[1]
-
-    # Every source-level categorical fluctuation is zero sum. Remove only
-    # floating-point accumulation error from the final field.
-    noise[-1] -= float(noise.sum())
-    return noise
+    sampler = _PreparedNearestNeighbourGaussianSampler(
+        counts.size,
+        float(jump_probability),
+    )
+    return sampler.sample(counts, rng, sampler.new_workspace())
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +310,10 @@ class _CorrelatedModalBase:
         )
         self.basis = eigendecompose(operator, n_modes=n_modes)
         self._one_step_factors = 1.0 - config.dt * self.basis.eigenvalues
+        self._noise_sampler = _PreparedNearestNeighbourGaussianSampler(
+            config.n_nodes,
+            config.jump_probability,
+        )
         if np.min(self._one_step_factors) < -1e-12:
             raise ValueError(
                 "The timestep is too large for the fastest retained mode: "
@@ -280,11 +344,12 @@ class _CorrelatedModalBase:
         self,
         source_counts: FloatArray,
         rng: np.random.Generator,
+        workspace: _NearestNeighbourGaussianWorkspace,
     ) -> FloatArray:
-        spatial_noise = sample_nearest_neighbour_gaussian_noise(
+        spatial_noise = self._noise_sampler.sample(
             source_counts,
-            self.config.jump_probability,
             rng,
+            workspace,
         )
         modal_noise = self.basis.to_modal(spatial_noise)
         # The constant mode must remain deterministic because every physical
@@ -310,6 +375,7 @@ class CorrelatedModalDiffusion(_CorrelatedModalBase):
         modal = np.zeros((self.config.n_steps, self.n_modes), dtype=float)
         spatial = np.zeros((self.config.n_steps, self.config.n_nodes), dtype=float)
         noise_sources = np.zeros_like(spatial)
+        noise_workspace = self._noise_sampler.new_workspace()
 
         modal[0] = self.basis.to_modal(initial)
         spatial[0] = self.basis.to_spatial(modal[0])
@@ -320,7 +386,7 @@ class CorrelatedModalDiffusion(_CorrelatedModalBase):
             source = self._noise_source_proxy(spatial[time_index])
             noise_sources[time_index] = source
             next_modal = self._one_step_factors * modal[time_index]
-            next_modal += self._modal_noise(source, generator)
+            next_modal += self._modal_noise(source, generator, noise_workspace)
             next_modal[0] = conserved_zero_mode
             modal[time_index + 1] = next_modal
             spatial[time_index + 1] = self.basis.to_spatial(next_modal)
@@ -361,6 +427,7 @@ class BankedCorrelatedModalDiffusion(_CorrelatedModalBase):
         raw = np.zeros_like(physical)
         adjusted = np.zeros_like(physical)
         bank = np.zeros_like(physical)
+        noise_workspace = self._noise_sampler.new_workspace()
 
         physical[0] = initial
         modal[0] = self.basis.to_modal(initial)
@@ -374,6 +441,7 @@ class BankedCorrelatedModalDiffusion(_CorrelatedModalBase):
             next_modal_candidate += self._modal_noise(
                 physical[time_index],
                 generator,
+                noise_workspace,
             )
             next_modal_candidate[0] = conserved_zero_mode
 
@@ -423,6 +491,14 @@ class HandoffCorrelatedModalResult:
     @property
     def minimum_count(self) -> float:
         return float(np.min(self.spatial_counts))
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffCorrelatedModalMinimalResult:
+    """Counts plus retained coordinates needed by downstream completion."""
+
+    spatial_counts: FloatArray
+    retained_modal_amplitudes: FloatArray
 
 
 class HandoffCorrelatedModalDiffusion:
@@ -486,6 +562,10 @@ class HandoffCorrelatedModalDiffusion:
         self.final_n_modes = final
         self._initial_factors = initial_factors
         self._final_factors = final_factors
+        self._noise_sampler = _PreparedNearestNeighbourGaussianSampler(
+            config.n_nodes,
+            config.jump_probability,
+        )
         self.handoff_step = int(np.argmin(np.abs(config.times - float(handoff_time))))
         self.handoff_time = float(config.times[self.handoff_step])
 
@@ -510,11 +590,12 @@ class HandoffCorrelatedModalDiffusion:
         source_counts: FloatArray,
         basis: Eigenbasis,
         rng: np.random.Generator,
+        workspace: _NearestNeighbourGaussianWorkspace,
     ) -> FloatArray:
-        spatial_noise = sample_nearest_neighbour_gaussian_noise(
+        spatial_noise = self._noise_sampler.sample(
             source_counts,
-            self.config.jump_probability,
             rng,
+            workspace,
         )
         modal_noise = basis.to_modal(spatial_noise)
         modal_noise[0] = 0.0
@@ -533,6 +614,7 @@ class HandoffCorrelatedModalDiffusion:
         # Store modal amplitudes in the initial/high-rank coordinate array.
         # Entries above final_n_modes are exactly zero after the handoff.
         modal_padded = np.zeros((n_steps, self.initial_n_modes), dtype=float)
+        noise_workspace = self._noise_sampler.new_workspace()
 
         high_modal = self.initial_basis.to_modal(initial)
         modal_padded[0] = high_modal
@@ -544,7 +626,12 @@ class HandoffCorrelatedModalDiffusion:
             source = self._noise_source_proxy(spatial[time_index])
             noise_sources[time_index] = source
             next_modal = self._initial_factors * modal_padded[time_index]
-            next_modal += self._modal_noise(source, self.initial_basis, generator)
+            next_modal += self._modal_noise(
+                source,
+                self.initial_basis,
+                generator,
+                noise_workspace,
+            )
             next_modal[0] = conserved_zero_mode
             modal_padded[time_index + 1] = next_modal
             spatial[time_index + 1] = self.initial_basis.to_spatial(next_modal)
@@ -569,7 +656,12 @@ class HandoffCorrelatedModalDiffusion:
             noise_sources[time_index] = source
             current_low = modal_padded[time_index, : self.final_n_modes]
             next_low = self._final_factors * current_low
-            next_low += self._modal_noise(source, self.final_basis, generator)
+            next_low += self._modal_noise(
+                source,
+                self.final_basis,
+                generator,
+                noise_workspace,
+            )
             next_low[0] = conserved_zero_mode
             modal_padded[time_index + 1, : self.final_n_modes] = next_low
             spatial[time_index + 1] = self.final_basis.to_spatial(next_low)
@@ -594,4 +686,82 @@ class HandoffCorrelatedModalDiffusion:
             final_n_modes=self.final_n_modes,
             handoff_projection_relative_l2=projection_error,
             modal_update_fraction_of_full=float(modal_work / full_work),
+        )
+
+    def run_minimal(
+        self,
+        rng: np.random.Generator | None = None,
+    ) -> HandoffCorrelatedModalMinimalResult:
+        """Return the full spatial field and only the retained modal history.
+
+        The detailed :meth:`run` method also stores every conditional-noise
+        source and a high-rank padded modal trajectory for diagnostics.  This
+        production path instead keeps rolling modal state and the retained
+        coordinates consumed by persistent completion.  It preserves the
+        same transition and random-number order.
+        """
+
+        generator = np.random.default_rng() if rng is None else rng
+        initial = self.initial_spatial_counts()
+        n_steps = self.config.n_steps
+        n_nodes = self.config.n_nodes
+
+        spatial = np.empty((n_steps, n_nodes), dtype=float)
+        retained = np.empty((n_steps, self.final_n_modes), dtype=float)
+        source = np.empty(n_nodes, dtype=float)
+        simplex_workspace = np.empty((1, n_nodes), dtype=float)
+        noise_workspace = self._noise_sampler.new_workspace()
+
+        high_modal = self.initial_basis.to_modal(initial)
+        retained[0] = high_modal[: self.final_n_modes]
+        spatial[0] = self.initial_basis.to_spatial(high_modal)
+        conserved_zero_mode = float(high_modal[0])
+
+        for time_index in range(self.handoff_step):
+            _project_to_mass_simplex_prevalidated(
+                spatial[time_index],
+                float(self.config.n_particles),
+                source,
+                simplex_workspace,
+            )
+            next_modal = self._initial_factors * high_modal
+            next_modal += self._modal_noise(
+                source,
+                self.initial_basis,
+                generator,
+                noise_workspace,
+            )
+            next_modal[0] = conserved_zero_mode
+            high_modal = next_modal
+            retained[time_index + 1] = next_modal[: self.final_n_modes]
+            spatial[time_index + 1] = self.initial_basis.to_spatial(next_modal)
+
+        pre_handoff = spatial[self.handoff_step].copy()
+        low_modal = self.final_basis.to_modal(pre_handoff)
+        low_modal[0] = conserved_zero_mode
+        retained[self.handoff_step] = low_modal
+        spatial[self.handoff_step] = self.final_basis.to_spatial(low_modal)
+
+        for time_index in range(self.handoff_step, n_steps - 1):
+            _project_to_mass_simplex_prevalidated(
+                spatial[time_index],
+                float(self.config.n_particles),
+                source,
+                simplex_workspace,
+            )
+            next_low = self._final_factors * low_modal
+            next_low += self._modal_noise(
+                source,
+                self.final_basis,
+                generator,
+                noise_workspace,
+            )
+            next_low[0] = conserved_zero_mode
+            low_modal = next_low
+            retained[time_index + 1] = next_low
+            spatial[time_index + 1] = self.final_basis.to_spatial(next_low)
+
+        return HandoffCorrelatedModalMinimalResult(
+            spatial_counts=spatial,
+            retained_modal_amplitudes=retained,
         )

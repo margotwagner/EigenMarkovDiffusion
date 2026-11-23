@@ -11,6 +11,53 @@ from eigendiffusion import (
     run_modal_ensemble,
     sample_nearest_neighbour_gaussian_noise,
 )
+from eigendiffusion.correlated_modal import _PreparedNearestNeighbourGaussianSampler
+
+
+def _legacy_nearest_neighbour_gaussian_noise(
+    source_counts: np.ndarray,
+    jump_probability: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Reference the allocation-heavy sampler used before preparation."""
+
+    counts = np.clip(np.asarray(source_counts, dtype=float), 0.0, None)
+    p = float(jump_probability)
+    noise = np.zeros_like(counts)
+
+    def local_noise(mass: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
+        probabilities = np.asarray(probabilities, dtype=float)
+        if mass.ndim == 0:
+            z = rng.standard_normal(probabilities.size)
+            weighted = np.sqrt(probabilities) * z
+            return np.sqrt(float(mass)) * (
+                weighted - probabilities * float(weighted.sum())
+            )
+
+        z = rng.standard_normal((mass.size, probabilities.size))
+        weighted = np.sqrt(probabilities)[None, :] * z
+        return np.sqrt(mass)[:, None] * (
+            weighted - probabilities[None, :] * weighted.sum(axis=1, keepdims=True)
+        )
+
+    left = local_noise(np.asarray(counts[0]), np.asarray([1.0 - p, p]))
+    noise[0] += left[0]
+    noise[1] += left[1]
+
+    if counts.size > 2:
+        interior = local_noise(
+            counts[1:-1],
+            np.asarray([p, 1.0 - 2.0 * p, p]),
+        )
+        noise[:-2] += interior[:, 0]
+        noise[1:-1] += interior[:, 1]
+        noise[2:] += interior[:, 2]
+
+    right = local_noise(np.asarray(counts[-1]), np.asarray([p, 1.0 - p]))
+    noise[-2] += right[0]
+    noise[-1] += right[1]
+    noise[-1] -= float(noise.sum())
+    return noise
 
 
 def test_independent_modal_alias_preserves_original_model_exactly():
@@ -41,6 +88,41 @@ def test_shared_spatial_noise_is_zero_sum():
         rng=np.random.default_rng(4),
     )
     assert abs(noise.sum()) < 1e-12
+
+
+def test_public_noise_sampler_preserves_legacy_bits_and_rng_state():
+    counts = np.array([-5.0e-13, 10.0])
+    expected_rng = np.random.default_rng(41)
+    actual_rng = np.random.default_rng(41)
+
+    expected = _legacy_nearest_neighbour_gaussian_noise(counts, 0.5, expected_rng)
+    actual = sample_nearest_neighbour_gaussian_noise(counts, 0.5, actual_rng)
+
+    assert np.array_equal(actual, expected)
+    np.testing.assert_equal(actual_rng.bit_generator.state, expected_rng.bit_generator.state)
+
+
+def test_prepared_noise_sampler_reuses_workspace_without_changing_stream():
+    jump_probability = 0.12
+    sampler = _PreparedNearestNeighbourGaussianSampler(21, jump_probability)
+    workspace = sampler.new_workspace()
+    expected_rng = np.random.default_rng(73)
+    actual_rng = np.random.default_rng(73)
+
+    for counts in (
+        np.linspace(0.0, 100.0, 21),
+        np.linspace(100.0, 1.0, 21),
+        np.square(np.linspace(0.0, 5.0, 21)),
+    ):
+        expected = _legacy_nearest_neighbour_gaussian_noise(
+            counts,
+            jump_probability,
+            expected_rng,
+        )
+        actual = sampler.sample(counts, actual_rng, workspace)
+        assert np.array_equal(actual, expected)
+
+    np.testing.assert_equal(actual_rng.bit_generator.state, expected_rng.bit_generator.state)
 
 
 def test_shared_spatial_noise_matches_conditional_covariance():

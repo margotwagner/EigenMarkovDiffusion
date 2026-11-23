@@ -756,45 +756,117 @@ class PersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
     ) -> tuple[FloatArray, FloatArray]:
         """Return persistently completed counts and the added unresolved field."""
 
+        completed, additions = self._complete_impl(
+            raw_counts,
+            rng=rng,
+            retained_states=None,
+            return_additions=True,
+        )
+        if additions is None:  # pragma: no cover - fixed by return_additions=True
+            raise RuntimeError("persistent completion omitted requested additions")
+        return completed, additions
+
+    def complete_counts(
+        self,
+        raw_counts: FloatArray,
+        rng: np.random.Generator | None = None,
+        *,
+        retained_states: FloatArray | None = None,
+    ) -> FloatArray:
+        """Return only the completed full-field trajectory.
+
+        This execution path is intended for production callers that do not
+        need the unresolved spatial-addition history.  Supplying retained
+        modal coordinates also avoids projecting the full spatial trajectory
+        back into the retained basis.  The latent recurrence and random draw
+        order are identical to :meth:`complete`.
+        """
+
+        completed, _ = self._complete_impl(
+            raw_counts,
+            rng=rng,
+            retained_states=retained_states,
+            return_additions=False,
+        )
+        return completed
+
+    def _complete_impl(
+        self,
+        raw_counts: FloatArray,
+        *,
+        rng: np.random.Generator | None,
+        retained_states: FloatArray | None,
+        return_additions: bool,
+    ) -> tuple[FloatArray, FloatArray | None]:
+        """Apply the persistent recurrence with optional auxiliary storage."""
+
         values = self._validate_counts(raw_counts)
         if self.omitted_modes == 0:
-            return values.copy(), np.zeros_like(values)
+            additions = np.zeros_like(values) if return_additions else None
+            return values.copy(), additions
 
         generator = np.random.default_rng() if rng is None else rng
         completed = values.copy()
-        additions = np.zeros_like(values)
+        additions = np.zeros_like(values) if return_additions else None
         v_r = self.retained_basis.eigenvectors
         start = self.completion_start_step
 
-        retained_states = values @ v_r
+        if retained_states is None:
+            retained = values @ v_r
+        else:
+            retained = np.asarray(retained_states, dtype=float)
+            expected_shape = (self.config.n_steps, self.retained_modes)
+            if retained.shape != expected_shape:
+                raise ValueError(
+                    "retained_states must have shape "
+                    f"(config.n_steps, retained_modes) = {expected_shape}"
+                )
+            if not np.all(np.isfinite(retained)):
+                raise ValueError("retained_states must be finite")
+
         initial = self._initial_step
         if initial is None:
             return completed, additions
 
         initial_mean = initial.omitted_mean + (
             initial.conditional_gain
-            @ (retained_states[start] - initial.retained_mean)
+            @ (retained[start] - initial.retained_mean)
         )
         unresolved_state = self._sample_gaussian(
             initial_mean,
             initial.conditional_factor,
             generator,
         )
-        addition = self._spatial_addition(unresolved_state)
-        additions[start] = addition
-        completed[start] = values[start] + addition
+        unresolved_history = (
+            np.empty(
+                (self.config.n_steps - start, self.omitted_modes),
+                dtype=float,
+            )
+            if additions is None
+            else None
+        )
+        if unresolved_history is None:
+            addition = self._spatial_addition(unresolved_state)
+            additions[start] = addition
+            completed[start] = values[start] + addition
+        else:
+            unresolved_history[0] = unresolved_state
+        conditioning_state = np.empty(
+            self.omitted_modes + 2 * self.retained_modes,
+            dtype=float,
+        )
 
         for time_index in range(start, self.config.n_steps - 1):
             parameters = self._transition_steps[time_index]
             if parameters is None:
                 continue
-            conditioning_state = np.concatenate(
-                [
-                    unresolved_state,
-                    retained_states[time_index],
-                    retained_states[time_index + 1],
-                ]
-            )
+            conditioning_state[: self.omitted_modes] = unresolved_state
+            conditioning_state[
+                self.omitted_modes : self.omitted_modes + self.retained_modes
+            ] = retained[time_index]
+            conditioning_state[
+                self.omitted_modes + self.retained_modes :
+            ] = retained[time_index + 1]
             conditional_mean = parameters.target_mean + (
                 parameters.conditional_gain
                 @ (conditioning_state - parameters.conditioning_mean)
@@ -804,9 +876,27 @@ class PersistentUnresolvedGaussianCompleter(_GaussianCompletionBase):
                 parameters.conditional_factor,
                 generator,
             )
-            addition = self._spatial_addition(unresolved_state)
-            additions[time_index + 1] = addition
-            completed[time_index + 1] = values[time_index + 1] + addition
+            if unresolved_history is None:
+                addition = self._spatial_addition(unresolved_state)
+                additions[time_index + 1] = addition
+                completed[time_index + 1] = values[time_index + 1] + addition
+            else:
+                unresolved_history[time_index + 1 - start] = unresolved_state
+
+        if unresolved_history is not None:
+            spatial_additions = completed[start:]
+            np.matmul(
+                unresolved_history,
+                self.omitted_eigenvectors.T,
+                out=spatial_additions,
+            )
+            # Omitted eigenvectors exclude the constant mode. Remove only the
+            # accumulated matrix-product roundoff in each row's total mass.
+            spatial_additions -= (
+                spatial_additions.sum(axis=1, keepdims=True)
+                / self.config.n_nodes
+            )
+            completed[start:] += values[start:]
 
         return completed, additions
 

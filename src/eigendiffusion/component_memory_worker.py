@@ -12,7 +12,7 @@ import numpy as np
 from .benchmarking import deep_numpy_nbytes
 from .component_benchmark import (
     STANDARD_COMPARATOR_METHODS,
-    _apply_readout,
+    _execute_full_field_component_counts,
     _run_standard_comparator,
     _standard_comparator_is_stochastic,
     _standard_comparator_requires_integer,
@@ -108,20 +108,17 @@ def run_worker(spec: dict[str, object]) -> None:
         simulation_sequence, completion_sequence = np.random.SeedSequence(
             int(spec["seed"])
         ).spawn(2)
-        raw = pipeline.simulator.run(rng=np.random.default_rng(simulation_sequence))
-        completed, additions = pipeline.completer.complete(
-            raw.spatial_counts,
-            rng=np.random.default_rng(completion_sequence),
+        counts = _execute_full_field_component_counts(
+            pipeline,
+            readout=readout,
+            simulation_rng=np.random.default_rng(simulation_sequence),
+            completion_rng=np.random.default_rng(completion_sequence),
         )
-        physical = _apply_readout(completed, config.n_particles, readout)
-        counts = physical.counts
-        resident_array_bytes = deep_numpy_nbytes(
-            (pipeline, raw, completed, additions, physical)
-        )
-        output_array_bytes = physical.counts.nbytes
-        returned_result_array_bytes = deep_numpy_nbytes(physical)
+        resident_array_bytes = deep_numpy_nbytes((pipeline, counts))
+        output_array_bytes = counts.nbytes
+        returned_result_array_bytes = counts.nbytes
         transient_core_array_bytes = 0
-        output_dtype = str(physical.counts.dtype)
+        output_dtype = str(counts.dtype)
     rss, hwm = _memory_status()
     _emit(
         "trajectory_end",

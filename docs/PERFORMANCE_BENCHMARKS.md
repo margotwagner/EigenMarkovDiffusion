@@ -158,3 +158,35 @@ accuracy and performance gates, but a
 hardened rerun rejects bandwidths 12 and 20 on long-domain lag covariance.
 Selected-pipeline benchmarks therefore use dense persistent completion by
 default; local closure remains an explicit memory experiment.
+
+## Counts-only kernel optimization benchmark
+
+The November 23, 2026 schema-v5 benchmark measures a production-oriented path
+that preserves the full field at every timestep but omits diagnostic histories.
+It prepares the nearest-neighbour Gaussian sampler, shares the simplex kernel,
+passes retained modal coordinates directly into completion, batches the
+unresolved reconstruction, and returns only physical counts. Detailed APIs
+remain available for diagnostics.
+
+The benchmark used 30 balanced trajectory repeats, five setup repeats, one
+warmup, one BLAS thread, both scaling regimes, and the exact vectorized
+multinomial walk as the primary comparator.
+
+| Regime | Nodes | Old simplex (ms) | Optimized simplex (ms) | Exact vectorized (ms) | Optimized modal/exact | Optimized integer (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| Fixed steps | 101 | 35.770 | 24.308 | 6.604 | 3.68 | 27.885 |
+| Fixed steps | 201 | 41.477 | 29.421 | 7.214 | 4.08 | 33.371 |
+| Fixed duration | 101 | 35.340 | 24.247 | 6.569 | 3.69 | 27.928 |
+| Fixed duration | 201 | 97.947 | 68.125 | 17.229 | 3.95 | 77.240 |
+
+At the 201-node fixed-duration point, raw dynamics fell 31.2%, completion
+application 44.1%, simplex readout 19.0%, and the simplex end-to-end path
+30.4%. The counts-only return reduced returned arrays from three full fields
+to one and reduced post-return modal arrays from 27.72 to 25.22 MiB. Peak RSS
+remained approximately 293 MiB because dense completion setup dominates it.
+
+This closes a substantial constant-factor gap but does not establish a
+crossover. The next performance experiment should therefore make the
+stochastic evolution genuinely retained-dimensional, rather than continue
+tuning the current node-space noise construction. The generated artifacts are
+`outputs/component_benchmark/optimized_101_201_{samples.csv,memory.csv,summary.json}`.

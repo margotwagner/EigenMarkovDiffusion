@@ -49,7 +49,7 @@ from .completion import (
     UnresolvedGaussianCompleter,
 )
 from .config import DiffusionConfig
-from .correlated_modal import project_to_mass_simplex
+from .simplex import _project_to_mass_simplex_prevalidated
 
 FloatArray = NDArray[np.float64]
 ReadoutName = Literal[
@@ -109,22 +109,53 @@ def integer_simplex_quantize(values: FloatArray, total_mass: int) -> FloatArray:
     if not np.all(np.isfinite(vector)):
         raise ValueError("values must be finite")
 
-    projected = project_to_mass_simplex(vector, float(total_mass))
-    floored = np.floor(projected).astype(np.int64)
+    projected = np.empty_like(vector)
+    floored = np.empty(vector.size, dtype=np.int64)
+    workspace = np.empty((1, vector.size), dtype=float)
+    return _integer_simplex_quantize_prevalidated(
+        vector,
+        total_mass,
+        projected,
+        projected,
+        floored,
+        workspace,
+    )
+
+
+def _integer_simplex_quantize_prevalidated(
+    values: FloatArray,
+    total_mass: int,
+    out: FloatArray,
+    projected: FloatArray,
+    floored: NDArray[np.int64],
+    workspace: FloatArray,
+) -> FloatArray:
+    """Quantize one validated row using caller-owned reusable buffers."""
+
+    _project_to_mass_simplex_prevalidated(
+        values,
+        float(total_mass),
+        projected,
+        workspace,
+    )
+    np.floor(projected, out=workspace[0])
+    np.copyto(floored, workspace[0], casting="unsafe")
     remainder = int(total_mass - int(floored.sum()))
-    if remainder < 0 or remainder > vector.size:
+    if remainder < 0 or remainder > values.size:
         raise RuntimeError("integer simplex rounding produced an invalid remainder")
 
     if remainder:
-        fractions = projected - floored
-        # Stable sorting makes exact ties deterministic.
-        order = np.argsort(-fractions, kind="stable")
+        np.subtract(projected, floored, out=workspace[0])
+        # Sorting the negated fractions with a stable algorithm retains the
+        # historical first-coordinate-wins rule for exact ties.
+        np.negative(workspace[0], out=workspace[0])
+        order = np.argsort(workspace[0], kind="stable")
         floored[order[:remainder]] += 1
 
-    result = floored.astype(float)
-    if int(result.sum()) != int(total_mass):
+    np.copyto(out, floored, casting="unsafe")
+    if int(out.sum()) != int(total_mass):
         raise RuntimeError("integer simplex quantizer failed to conserve mass")
-    return result
+    return out
 
 
 def raw_readout(raw_counts: FloatArray, total_mass: int) -> ReadoutResult:
@@ -154,21 +185,27 @@ def simplex_bank_readout(raw_counts: FloatArray, total_mass: int) -> ReadoutResu
     """
 
     values = _validate_trajectory(raw_counts, total_mass)
-    outputs = np.zeros_like(values)
-    residuals = np.zeros_like(values)
-    adjusted = np.zeros_like(values)
+    outputs = np.empty_like(values)
+    residuals = np.empty_like(values)
+    adjusted = np.empty_like(values)
     previous_residual = np.zeros(values.shape[1], dtype=float)
+    workspace = np.empty((1, values.shape[1]), dtype=float)
 
     for time_index, row in enumerate(values):
-        current = row + previous_residual
-        output = project_to_mass_simplex(current, float(total_mass))
-        residual = current - output
+        current = adjusted[time_index]
+        output = outputs[time_index]
+        residual = residuals[time_index]
+        np.add(row, previous_residual, out=current)
+        _project_to_mass_simplex_prevalidated(
+            current,
+            float(total_mass),
+            output,
+            workspace,
+        )
+        np.subtract(current, output, out=residual)
         # Remove only floating-point zero-sum drift.
         residual[-1] -= float(residual.sum())
 
-        adjusted[time_index] = current
-        outputs[time_index] = output
-        residuals[time_index] = residual
         previous_residual = residual
 
     return ReadoutResult(
@@ -177,6 +214,34 @@ def simplex_bank_readout(raw_counts: FloatArray, total_mass: int) -> ReadoutResu
         adjusted_inputs=adjusted,
         readout_name="simplex_bank",
     )
+
+
+def simplex_bank_counts(raw_counts: FloatArray, total_mass: int) -> FloatArray:
+    """Return only simplex-bank counts using rolling row buffers.
+
+    This is equivalent to ``simplex_bank_readout(...).counts`` but does not
+    retain the adjusted-input and temporal-residual histories.  The residual
+    ledger is still propagated exactly from one row to the next.
+    """
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    outputs = np.empty_like(values)
+    residual = np.zeros(values.shape[1], dtype=float)
+    current = np.empty(values.shape[1], dtype=float)
+    workspace = np.empty((1, values.shape[1]), dtype=float)
+
+    for row, output in zip(values, outputs, strict=True):
+        np.add(row, residual, out=current)
+        _project_to_mass_simplex_prevalidated(
+            current,
+            float(total_mass),
+            output,
+            workspace,
+        )
+        np.subtract(current, output, out=residual)
+        residual[-1] -= float(residual.sum())
+
+    return outputs
 
 
 def temporal_delta_sigma_readout(
@@ -191,20 +256,30 @@ def temporal_delta_sigma_readout(
     """
 
     values = _validate_trajectory(raw_counts, total_mass)
-    outputs = np.zeros_like(values)
-    residuals = np.zeros_like(values)
-    adjusted = np.zeros_like(values)
+    outputs = np.empty_like(values)
+    residuals = np.empty_like(values)
+    adjusted = np.empty_like(values)
     previous_residual = np.zeros(values.shape[1], dtype=float)
+    projected = np.empty(values.shape[1], dtype=float)
+    floored = np.empty(values.shape[1], dtype=np.int64)
+    workspace = np.empty((1, values.shape[1]), dtype=float)
 
     for time_index, row in enumerate(values):
-        current = row + previous_residual
-        output = integer_simplex_quantize(current, total_mass)
-        residual = current - output
+        current = adjusted[time_index]
+        output = outputs[time_index]
+        residual = residuals[time_index]
+        np.add(row, previous_residual, out=current)
+        _integer_simplex_quantize_prevalidated(
+            current,
+            total_mass,
+            output,
+            projected,
+            floored,
+            workspace,
+        )
+        np.subtract(current, output, out=residual)
         residual[-1] -= float(residual.sum())
 
-        adjusted[time_index] = current
-        outputs[time_index] = output
-        residuals[time_index] = residual
         previous_residual = residual
 
     return ReadoutResult(
@@ -213,6 +288,42 @@ def temporal_delta_sigma_readout(
         adjusted_inputs=adjusted,
         readout_name="delta_sigma_temporal",
     )
+
+
+def temporal_delta_sigma_counts(
+    raw_counts: FloatArray,
+    total_mass: int,
+) -> FloatArray:
+    """Return only temporal Delta-Sigma counts using rolling row buffers.
+
+    This is equivalent to ``temporal_delta_sigma_readout(...).counts`` while
+    retaining only the current adjusted row, quantizer work arrays, and the
+    temporal residual ledger.
+    """
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    n_nodes = values.shape[1]
+    outputs = np.empty_like(values)
+    residual = np.zeros(n_nodes, dtype=float)
+    current = np.empty(n_nodes, dtype=float)
+    projected = np.empty(n_nodes, dtype=float)
+    floored = np.empty(n_nodes, dtype=np.int64)
+    workspace = np.empty((1, n_nodes), dtype=float)
+
+    for row, output in zip(values, outputs, strict=True):
+        np.add(row, residual, out=current)
+        _integer_simplex_quantize_prevalidated(
+            current,
+            total_mass,
+            output,
+            projected,
+            floored,
+            workspace,
+        )
+        np.subtract(current, output, out=residual)
+        residual[-1] -= float(residual.sum())
+
+    return outputs
 
 
 def neighbor_delta_sigma_readout(

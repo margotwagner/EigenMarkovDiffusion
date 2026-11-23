@@ -70,6 +70,32 @@ def test_handoff_conserves_mass() -> None:
     assert np.allclose(result.modal_amplitudes[6:, 8:], 0.0)
 
 
+def test_handoff_minimal_path_matches_detailed_trajectory() -> None:
+    config = small_config()
+    simulator = HandoffCorrelatedModalDiffusion(
+        config,
+        initial_n_modes=config.n_nodes,
+        final_n_modes=8,
+        handoff_time=5.0,
+    )
+
+    detailed = simulator.run(rng=np.random.default_rng(71))
+    minimal = simulator.run_minimal(rng=np.random.default_rng(71))
+
+    np.testing.assert_allclose(
+        minimal.spatial_counts,
+        detailed.spatial_counts,
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        minimal.retained_modal_amplitudes,
+        detailed.modal_amplitudes[:, : simulator.final_n_modes],
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
 def test_handoff_ensemble_reports_projection_error() -> None:
     config = small_config()
     ensemble = run_handoff_correlated_modal_ensemble(

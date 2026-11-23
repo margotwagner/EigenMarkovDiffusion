@@ -18,6 +18,7 @@ from eigendiffusion.component_benchmark import (
     fixed_step_component_config,
     measure_component_memory,
     measure_standard_comparator_memory,
+    run_full_field_component_counts,
     run_full_field_component_pipeline,
     validate_full_field_output,
     write_component_benchmark_csv,
@@ -64,6 +65,30 @@ def test_full_field_component_pipeline_is_seed_reproducible() -> None:
     assert np.all(first.counts == np.rint(first.counts))
     assert np.all(first.counts >= 0.0)
     assert np.all(first.counts.sum(axis=1) == config.n_particles)
+
+
+@pytest.mark.parametrize("readout", ["simplex_bank", "delta_sigma_temporal"])
+def test_counts_only_component_path_matches_detailed_result(readout: str) -> None:
+    config = _tiny_config()
+    pipeline = build_full_field_component_pipeline(
+        config,
+        retained_modes=4,
+        handoff_time=0.4,
+        completion_rank=1,
+    )
+
+    detailed = run_full_field_component_pipeline(
+        pipeline,
+        readout=readout,  # type: ignore[arg-type]
+        seed=14,
+    )
+    counts_only = run_full_field_component_counts(
+        pipeline,
+        readout=readout,  # type: ignore[arg-type]
+        seed=14,
+    )
+
+    np.testing.assert_array_equal(counts_only, detailed.counts)
 
 
 def test_component_benchmark_records_all_stages_and_writes_artifacts(tmp_path) -> None:
@@ -207,7 +232,7 @@ def test_component_scaling_runs_two_node_counts_and_reports_slopes(tmp_path) -> 
 
     summary = scaling.summary()
     assert summary["operating_point"] == "accuracy_first"
-    assert summary["schema_version"] == 4
+    assert summary["schema_version"] == 5
     assert len(summary["configurations"]) == 4
     assert summary["memory_records"] == []
     assert len(summary["standard_comparators"]) == 12

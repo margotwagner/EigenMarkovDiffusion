@@ -41,7 +41,9 @@ from .correlated_modal import HandoffCorrelatedModalDiffusion
 from .readouts import (
     ReadoutResult,
     readout_constraint_diagnostics,
+    simplex_bank_counts,
     simplex_bank_readout,
+    temporal_delta_sigma_counts,
     temporal_delta_sigma_readout,
 )
 
@@ -220,6 +222,7 @@ class StandardSimulationBenchmark:
             ),
             "regime": self.regime,
             "output_workload": "full_field_every_timestep",
+            "execution_path": "native_counts_only",
             "n_particles": self.config.n_particles,
             "n_nodes": self.config.n_nodes,
             "n_steps": self.config.n_steps,
@@ -267,6 +270,7 @@ class StandardSimulationBenchmark:
                     self.method
                 ),
                 "output_workload": "full_field_every_timestep",
+                "execution_path": "native_counts_only",
                 "setup_applicable": False,
             },
             "timing": {
@@ -341,6 +345,7 @@ class FullFieldComponentBenchmark:
             "output_semantics": "stochastic_trajectory",
             "regime": self.regime,
             "output_workload": "full_field_every_timestep",
+            "execution_path": "minimal_counts_only",
             "n_particles": self.config.n_particles,
             "n_nodes": self.config.n_nodes,
             "n_steps": self.config.n_steps,
@@ -439,6 +444,7 @@ class FullFieldComponentBenchmark:
                 "seed": self.seed,
                 "regime": self.regime,
                 "output_workload": "full_field_every_timestep",
+                "execution_path": "minimal_counts_only",
             },
             "components": component_summaries,
             "readouts": readout_summaries,
@@ -534,12 +540,26 @@ class ComponentMemoryRecord:
             - self.baseline_rss_bytes,
         )
 
+    @property
+    def overall_hwm_incremental_bytes(self) -> int:
+        """Process high-water increment across setup and trajectory."""
+
+        return max(
+            0,
+            self.process_peak_after_trajectory_rss_bytes
+            - self.baseline_peak_rss_bytes,
+        )
+
     def as_dict(self) -> dict[str, str | int | float | bool]:
         row: dict[str, str | int | float | bool] = asdict(self)
         row["method"] = "completed_modal"
         row["pipeline"] = "completed_modal"
         row["variant"] = self.readout
         row["output_semantics"] = "stochastic_trajectory"
+        row["schema_version"] = 5
+        row["execution_path"] = "minimal_counts_only"
+        row["output_workload"] = "full_field_every_timestep"
+        row["resident_array_semantics"] = "post_return_pipeline_plus_counts"
         row["setup_applicable"] = True
         row["setup_peak_incremental_bytes"] = self.setup_peak_incremental_bytes
         row["steady_setup_incremental_bytes"] = self.steady_setup_incremental_bytes
@@ -549,6 +569,7 @@ class ComponentMemoryRecord:
             self.trajectory_hwm_incremental_bytes
         )
         row["overall_peak_incremental_bytes"] = self.overall_peak_incremental_bytes
+        row["overall_hwm_incremental_bytes"] = self.overall_hwm_incremental_bytes
         for key, value in tuple(row.items()):
             if key.endswith("_bytes"):
                 row[key.removesuffix("_bytes") + "_megabytes"] = int(value) / 1024**2
@@ -615,9 +636,23 @@ class StandardSimulationMemoryRecord:
             - self.baseline_rss_bytes,
         )
 
+    @property
+    def overall_hwm_incremental_bytes(self) -> int:
+        """Process high-water increment across the trajectory."""
+
+        return max(
+            0,
+            self.process_peak_after_trajectory_rss_bytes
+            - self.baseline_peak_rss_bytes,
+        )
+
     def as_dict(self) -> dict[str, str | int | float | bool]:
         row: dict[str, str | int | float | bool] = asdict(self)
         row["pipeline"] = self.method
+        row["schema_version"] = 5
+        row["execution_path"] = "native_counts_only"
+        row["output_workload"] = "full_field_every_timestep"
+        row["resident_array_semantics"] = "post_return_counts"
         row["output_semantics"] = (
             "stochastic_trajectory"
             if _standard_comparator_is_stochastic(self.method)
@@ -630,6 +665,7 @@ class StandardSimulationMemoryRecord:
             self.trajectory_hwm_incremental_bytes
         )
         row["overall_peak_incremental_bytes"] = self.overall_peak_incremental_bytes
+        row["overall_hwm_incremental_bytes"] = self.overall_hwm_incremental_bytes
         for key, value in tuple(row.items()):
             if key.endswith("_bytes"):
                 row[key.removesuffix("_bytes") + "_megabytes"] = (
@@ -765,10 +801,11 @@ class ComponentScalingBenchmark:
         ]
 
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "operating_point": self.operating_point,
             "study_contract": {
                 "output_workload": "full_field_every_timestep",
+                "modal_execution_path": "minimal_counts_only",
                 "common_time_grid": True,
                 "standard_comparators": list(STANDARD_COMPARATOR_METHODS),
                 "primary_standard_comparator": PRIMARY_STANDARD_COMPARATOR_METHOD,
@@ -794,6 +831,15 @@ class ComponentScalingBenchmark:
                 "isolated_memory": (
                     "fresh process per configuration and readout; phase RSS is "
                     "sampled separately from timing"
+                ),
+                "isolated_resident_array_semantics": (
+                    "NumPy arrays retained after the call returns: prepared "
+                    "pipeline plus returned counts for modal, returned counts "
+                    "for standards"
+                ),
+                "staged_resident_array_semantics": (
+                    "maximum explicitly live NumPy arrays at component-stage "
+                    "checkpoints; not a transient allocation peak"
                 ),
             },
             "runtime_environment": {
@@ -982,15 +1028,21 @@ def _configuration_comparison(
             memory_comparison: dict[str, float | None] | None = None
             if modal_memory is not None and standard_memory is not None:
                 memory_comparison = {
+                    "overall_hwm_increment_ratio_modal_over_standard": (
+                        _safe_ratio(
+                            modal_memory.overall_hwm_incremental_bytes,
+                            standard_memory.overall_hwm_incremental_bytes,
+                        )
+                    ),
                     "overall_peak_increment_ratio_modal_over_standard": (
                         _safe_ratio(
                             modal_memory.overall_peak_incremental_bytes,
                             standard_memory.overall_peak_incremental_bytes,
                         )
                     ),
-                    "logical_peak_array_ratio_modal_over_standard": _safe_ratio(
+                    "post_return_resident_array_ratio_modal_over_standard": _safe_ratio(
                         modal_memory.resident_array_bytes,
-                        standard_memory.transient_core_array_bytes,
+                        standard_memory.resident_array_bytes,
                     ),
                     "returned_result_array_ratio_modal_over_standard": _safe_ratio(
                         modal_memory.returned_result_array_bytes,
@@ -1237,6 +1289,20 @@ def _apply_readout(
     raise ValueError(f"unknown component readout: {readout}")
 
 
+def _apply_readout_counts(
+    completed: np.ndarray,
+    total_mass: int,
+    readout: ComponentReadoutName,
+) -> np.ndarray:
+    """Apply a physical readout without retaining diagnostic histories."""
+
+    if readout == "simplex_bank":
+        return simplex_bank_counts(completed, total_mass)
+    if readout == "delta_sigma_temporal":
+        return temporal_delta_sigma_counts(completed, total_mass)
+    raise ValueError(f"unknown component readout: {readout}")
+
+
 def validate_full_field_output(
     counts: np.ndarray,
     config: DiffusionConfig,
@@ -1275,8 +1341,8 @@ def run_full_field_component_pipeline(
     result = _execute_full_field_component_pipeline(
         pipeline,
         readout=readout,
-        simulation_sequence=simulation_sequence,
-        completion_sequence=completion_sequence,
+        simulation_rng=np.random.default_rng(simulation_sequence),
+        completion_rng=np.random.default_rng(completion_sequence),
     )
     validate_full_field_output(
         result.counts,
@@ -1286,21 +1352,62 @@ def run_full_field_component_pipeline(
     return result
 
 
+def run_full_field_component_counts(
+    pipeline: FullFieldComponentPipeline,
+    *,
+    readout: ComponentReadoutName,
+    seed: int | Sequence[int] = 0,
+) -> np.ndarray:
+    """Run the counts-only full-field path without auxiliary histories."""
+
+    simulation_sequence, completion_sequence = np.random.SeedSequence(seed).spawn(2)
+    counts = _execute_full_field_component_counts(
+        pipeline,
+        readout=readout,
+        simulation_rng=np.random.default_rng(simulation_sequence),
+        completion_rng=np.random.default_rng(completion_sequence),
+    )
+    validate_full_field_output(
+        counts,
+        pipeline.config,
+        require_integer=readout == "delta_sigma_temporal",
+    )
+    return counts
+
+
 def _execute_full_field_component_pipeline(
     pipeline: FullFieldComponentPipeline,
     *,
     readout: ComponentReadoutName,
-    simulation_sequence: np.random.SeedSequence,
-    completion_sequence: np.random.SeedSequence,
+    simulation_rng: np.random.Generator,
+    completion_rng: np.random.Generator,
 ) -> ReadoutResult:
     """Execute one pipeline with preassigned random streams and no validation."""
 
-    raw = pipeline.simulator.run(rng=np.random.default_rng(simulation_sequence))
+    raw = pipeline.simulator.run(rng=simulation_rng)
     completed, _ = pipeline.completer.complete(
         raw.spatial_counts,
-        rng=np.random.default_rng(completion_sequence),
+        rng=completion_rng,
     )
     return _apply_readout(completed, pipeline.config.n_particles, readout)
+
+
+def _execute_full_field_component_counts(
+    pipeline: FullFieldComponentPipeline,
+    *,
+    readout: ComponentReadoutName,
+    simulation_rng: np.random.Generator,
+    completion_rng: np.random.Generator,
+) -> np.ndarray:
+    """Execute the minimal production path with preassigned random streams."""
+
+    raw = pipeline.simulator.run_minimal(rng=simulation_rng)
+    completed = pipeline.completer.complete_counts(
+        raw.spatial_counts,
+        rng=completion_rng,
+        retained_states=raw.retained_modal_amplitudes,
+    )
+    return _apply_readout_counts(completed, pipeline.config.n_particles, readout)
 
 
 def benchmark_full_field_components(
@@ -1377,7 +1484,7 @@ def benchmark_full_field_components(
 
     for warmup in range(warmup_runs):
         for readout in selected_readouts:
-            run_full_field_component_pipeline(
+            run_full_field_component_counts(
                 pipeline,
                 readout=readout,
                 seed=(seed, 0, warmup),
@@ -1434,20 +1541,21 @@ def benchmark_full_field_components(
             simulation_sequence, completion_sequence = np.random.SeedSequence(
                 [seed, 1, repeat]
             ).spawn(2)
+            simulation_rng = np.random.default_rng(simulation_sequence)
+            completion_rng = np.random.default_rng(completion_sequence)
 
             start = perf_counter()
-            raw = pipeline.simulator.run(
-                rng=np.random.default_rng(simulation_sequence)
-            )
+            raw = pipeline.simulator.run_minimal(rng=simulation_rng)
             raw_seconds = perf_counter() - start
             samples.append(
                 ComponentTimingSample("raw_dynamics", repeat, raw_seconds)
             )
 
             start = perf_counter()
-            completed, additions = pipeline.completer.complete(
+            completed = pipeline.completer.complete_counts(
                 raw.spatial_counts,
-                rng=np.random.default_rng(completion_sequence),
+                rng=completion_rng,
+                retained_states=raw.retained_modal_amplitudes,
             )
             completion_seconds = perf_counter() - start
             samples.append(
@@ -1461,14 +1569,14 @@ def benchmark_full_field_components(
                 readout_order.reverse()
             for readout in readout_order:
                 start = perf_counter()
-                physical = _apply_readout(
+                physical = _apply_readout_counts(
                     completed,
                     config.n_particles,
                     readout,
                 )
                 readout_seconds = perf_counter() - start
                 validate_full_field_output(
-                    physical.counts,
+                    physical,
                     config,
                     require_integer=readout == "delta_sigma_temporal",
                 )
@@ -1482,20 +1590,20 @@ def benchmark_full_field_components(
                 )
                 diagnostic_accumulator[readout].append(
                     readout_constraint_diagnostics(
-                        physical.counts,
+                        physical,
                         config.n_particles,
                     )
                 )
-                output_array_bytes = max(output_array_bytes, physical.counts.nbytes)
-                output_dtype = str(physical.counts.dtype)
+                output_array_bytes = max(output_array_bytes, physical.nbytes)
+                output_dtype = str(physical.dtype)
                 resident_array_bytes = max(
                     resident_array_bytes,
                     deep_numpy_nbytes(
-                        (pipeline, raw, completed, additions, physical)
+                        (pipeline, raw, completed, physical)
                     ),
                 )
 
-            del raw, completed, additions, physical
+            del raw, completed, physical
 
             total_tasks = [
                 ("completed_modal", readout) for readout in selected_readouts
@@ -1561,16 +1669,22 @@ def benchmark_full_field_components(
                 total_simulation_sequence, total_completion_sequence = (
                     np.random.SeedSequence([seed, 2, repeat]).spawn(2)
                 )
+                total_simulation_rng = np.random.default_rng(
+                    total_simulation_sequence
+                )
+                total_completion_rng = np.random.default_rng(
+                    total_completion_sequence
+                )
                 start = perf_counter()
-                physical = _execute_full_field_component_pipeline(
+                physical = _execute_full_field_component_counts(
                     pipeline,
                     readout=variant,  # type: ignore[arg-type]
-                    simulation_sequence=total_simulation_sequence,
-                    completion_sequence=total_completion_sequence,
+                    simulation_rng=total_simulation_rng,
+                    completion_rng=total_completion_rng,
                 )
                 total_seconds = perf_counter() - start
                 validate_full_field_output(
-                    physical.counts,
+                    physical,
                     config,
                     require_integer=variant == "delta_sigma_temporal",
                 )
