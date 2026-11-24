@@ -115,10 +115,12 @@ readout; `M=75`, conditional rank 25 is the current 201-node candidate.
 
 The next work should target the two costs that now dominate:
 
-1. Replace the sorting-based simplex bank with a linear-time nonnegative,
-   mass-conserving readout candidate and validate its moment and temporal
-   errors. Completed raw trajectories have many tiny negative tail entries,
-   but their average negative mass is only about `1.7e-4` of total mass.
+1. The first readout experiment replaced most sorts with a warm exact
+   active-set projection. It reduced readout time by 5--14% and prepared
+   end-to-end time by 4--8%, but the modal pipeline remains 29--36% slower than
+   the exact vectorized walk. The next candidate is clip-and-renormalize with
+   residual feedback, validated against the warm exact reference. See
+   [Warm-started exact simplex readout](WARM_SIMPLEX_READOUT.md).
 2. Stream or apply the full innovation covariance as an operator and retain
    only the selected gain/factor blocks. This should remove the prototype's
    full-reference duplication and make setup/storage genuinely reduced-order.

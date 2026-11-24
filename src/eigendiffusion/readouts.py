@@ -49,7 +49,14 @@ from .completion import (
     UnresolvedGaussianCompleter,
 )
 from .config import DiffusionConfig
-from .simplex import _project_to_mass_simplex_prevalidated
+from .simplex import (
+    _WARM_CORRECTED,
+    _WARM_FALLBACK,
+    _WARM_ZERO_UPDATE,
+    _WarmSimplexState,
+    _project_to_mass_simplex_prevalidated,
+    _project_to_mass_simplex_warm_prevalidated,
+)
 
 FloatArray = NDArray[np.float64]
 ReadoutName = Literal[
@@ -90,6 +97,41 @@ class ReadoutResult:
     @property
     def residual_l1(self) -> FloatArray:
         return np.abs(self.residuals).sum(axis=-1)
+
+
+@dataclass(frozen=True, slots=True)
+class WarmSimplexDiagnostics:
+    """Untimed per-row diagnostics for the warm simplex-bank path."""
+
+    total_rows: int
+    zero_update_rows: int
+    corrected_rows: int
+    fallback_rows: int
+    support_updates: NDArray[np.int64]
+    active_sizes: NDArray[np.int64]
+    support_changes: NDArray[np.int64]
+
+    @property
+    def warm_rows(self) -> int:
+        return max(self.total_rows - 1, 0)
+
+    @property
+    def zero_update_rate(self) -> float:
+        return self.zero_update_rows / max(self.warm_rows, 1)
+
+    @property
+    def corrected_rate(self) -> float:
+        return self.corrected_rows / max(self.warm_rows, 1)
+
+    @property
+    def fallback_rate(self) -> float:
+        return self.fallback_rows / max(self.warm_rows, 1)
+
+    @property
+    def updates_distribution(self) -> dict[int, int]:
+        successful = self.support_updates[self.support_updates >= 0]
+        values, counts = np.unique(successful, return_counts=True)
+        return {int(value): int(count) for value, count in zip(values, counts)}
 
 
 def integer_simplex_quantize(values: FloatArray, total_mass: int) -> FloatArray:
@@ -242,6 +284,146 @@ def simplex_bank_counts(raw_counts: FloatArray, total_mass: int) -> FloatArray:
         residual[-1] -= float(residual.sum())
 
     return outputs
+
+
+def warm_simplex_bank_readout(
+    raw_counts: FloatArray,
+    total_mass: int,
+) -> ReadoutResult:
+    """Apply simplex-bank feedback with warm active-set projections."""
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    outputs = np.empty_like(values)
+    residuals = np.empty_like(values)
+    adjusted = np.empty_like(values)
+    previous_residual = np.zeros(values.shape[1], dtype=float)
+    workspace = np.empty((1, values.shape[1]), dtype=float)
+    state = _WarmSimplexState.create(values.shape[1])
+
+    for time_index, row in enumerate(values):
+        current = adjusted[time_index]
+        output = outputs[time_index]
+        residual = residuals[time_index]
+        np.add(row, previous_residual, out=current)
+        _project_to_mass_simplex_warm_prevalidated(
+            current,
+            float(total_mass),
+            output,
+            workspace,
+            state,
+        )
+        np.subtract(current, output, out=residual)
+        residual[-1] -= float(residual.sum())
+        previous_residual = residual
+
+    return ReadoutResult(
+        counts=outputs,
+        residuals=residuals,
+        adjusted_inputs=adjusted,
+        readout_name="warm_simplex_bank",
+    )
+
+
+def _warm_simplex_bank_counts_impl(
+    values: FloatArray,
+    total_mass: int,
+    *,
+    collect_diagnostics: bool,
+) -> tuple[FloatArray, WarmSimplexDiagnostics | None]:
+    outputs = np.empty_like(values)
+    residual = np.zeros(values.shape[1], dtype=float)
+    current = np.empty(values.shape[1], dtype=float)
+    workspace = np.empty((1, values.shape[1]), dtype=float)
+    state = _WarmSimplexState.create(values.shape[1])
+    support_updates = (
+        np.full(values.shape[0], -1, dtype=np.int64)
+        if collect_diagnostics
+        else None
+    )
+    active_sizes = (
+        np.empty(values.shape[0], dtype=np.int64) if collect_diagnostics else None
+    )
+    support_changes = (
+        np.empty(values.shape[0], dtype=np.int64) if collect_diagnostics else None
+    )
+    zero_update_rows = 0
+    corrected_rows = 0
+    fallback_rows = 0
+
+    for time_index, (row, output) in enumerate(zip(values, outputs, strict=True)):
+        np.add(row, residual, out=current)
+        path, updates, active_size, changes = (
+            _project_to_mass_simplex_warm_prevalidated(
+                current,
+                float(total_mass),
+                output,
+                workspace,
+                state,
+                collect_metadata=collect_diagnostics,
+            )
+        )
+        np.subtract(current, output, out=residual)
+        residual[-1] -= float(residual.sum())
+        if not collect_diagnostics:
+            continue
+        if active_sizes is None or support_changes is None or support_updates is None:
+            raise RuntimeError("warm simplex diagnostic buffers are missing")
+        active_sizes[time_index] = active_size
+        support_changes[time_index] = changes
+        if time_index == 0:
+            continue
+        if path == _WARM_ZERO_UPDATE:
+            zero_update_rows += 1
+            support_updates[time_index] = 0
+        elif path == _WARM_CORRECTED:
+            corrected_rows += 1
+            support_updates[time_index] = updates
+        elif path == _WARM_FALLBACK:
+            fallback_rows += 1
+
+    diagnostics = None
+    if collect_diagnostics:
+        if active_sizes is None or support_changes is None or support_updates is None:
+            raise RuntimeError("warm simplex diagnostic buffers are missing")
+        diagnostics = WarmSimplexDiagnostics(
+            total_rows=values.shape[0],
+            zero_update_rows=zero_update_rows,
+            corrected_rows=corrected_rows,
+            fallback_rows=fallback_rows,
+            support_updates=support_updates,
+            active_sizes=active_sizes,
+            support_changes=support_changes,
+        )
+    return outputs, diagnostics
+
+
+def warm_simplex_bank_counts(raw_counts: FloatArray, total_mass: int) -> FloatArray:
+    """Return warm simplex-bank counts without retaining diagnostic history."""
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    outputs, _ = _warm_simplex_bank_counts_impl(
+        values,
+        total_mass,
+        collect_diagnostics=False,
+    )
+    return outputs
+
+
+def warm_simplex_bank_counts_with_diagnostics(
+    raw_counts: FloatArray,
+    total_mass: int,
+) -> tuple[FloatArray, WarmSimplexDiagnostics]:
+    """Return warm counts and untimed active-set diagnostics."""
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    outputs, diagnostics = _warm_simplex_bank_counts_impl(
+        values,
+        total_mass,
+        collect_diagnostics=True,
+    )
+    if diagnostics is None:  # pragma: no cover - fixed by argument above
+        raise RuntimeError("warm simplex diagnostics were not collected")
+    return outputs, diagnostics
 
 
 def temporal_delta_sigma_readout(

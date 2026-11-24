@@ -28,6 +28,7 @@ dynamics:
 
 - `raw`
 - `simplex_bank`
+- `warm_simplex_bank` (specialized exact counts/readout API)
 - `delta_sigma_temporal`
 - `delta_sigma_neighbor`
 - `unresolved_gaussian_completion`
@@ -38,7 +39,9 @@ dynamics:
 See [Modal models](docs/MODAL_MODELS.md) and
 [Mathematical details](docs/MATH.md) for definitions and assumptions. The
 direct-transition prototype, benchmark, and current decision are documented in
-[Direct retained-modal transition](docs/DIRECT_MODAL_TRANSITION.md).
+[Direct retained-modal transition](docs/DIRECT_MODAL_TRANSITION.md). The first
+physical-readout optimization and timing decision are documented in
+[Warm-started exact simplex readout](docs/WARM_SIMPLEX_READOUT.md).
 
 ## Installation
 
@@ -132,6 +135,7 @@ The available workflows are:
 | `benchmark-component-scaling` | Scale component timing and isolated memory across node counts |
 | `python -m eigendiffusion.direct_modal_benchmark` | Screen the direct retained transition across nodes and modes |
 | `python -m eigendiffusion.innovation_completion_benchmark` | Screen low-rank conditional innovation completion |
+| `python -m eigendiffusion.warm_simplex_benchmark` | Compare warm-started and sorting-based exact simplex readouts |
 | `study-operating-points` | Benchmark selected completed pipelines, peak RSS, and distribution error |
 | `study-structured-closure` | Select, validate, and scale the local persistent closure |
 | `study-fitted-closure` | Train and test a frozen trajectory-fitted sparse closure |
