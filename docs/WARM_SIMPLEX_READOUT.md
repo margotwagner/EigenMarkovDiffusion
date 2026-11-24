@@ -72,12 +72,11 @@ nodes. Holding the measured completion cost fixed, the readout would need to
 fall by approximately another 34% and 47%, respectively, merely to reach the
 exact comparator.
 
-The next experiment should therefore test clip-and-renormalize with temporal
-residual feedback. Unlike warm starting, that candidate changes the projection
-operator, so it must be compared against both this exact warm path and the
-multinomial reference for constraint preservation, mean/covariance/temporal
-accuracy, residual stability, and runtime. The exact warm projector should be
-kept as a fallback if the approximate residual becomes pathological.
+The follow-up tested clip-and-renormalize with temporal residual feedback. It
+reduced readout time substantially and preserved moment and temporal accuracy,
+but did not cross the exact comparator at 201 nodes and worsened marginal
+Jensen--Shannon divergence. See
+[Clip-and-renormalize residual feedback](CLIP_RENORMALIZE_READOUT.md).
 
 ## Reproduction
 

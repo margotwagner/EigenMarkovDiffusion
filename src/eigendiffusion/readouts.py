@@ -54,11 +54,17 @@ from .simplex import (
     _WARM_FALLBACK,
     _WARM_ZERO_UPDATE,
     _WarmSimplexState,
+    _correct_projected_mass,
     _project_to_mass_simplex_prevalidated,
     _project_to_mass_simplex_warm_prevalidated,
 )
 
 FloatArray = NDArray[np.float64]
+_MAX_CLIPPED_EXCESS_FRACTION = 0.05
+_MAX_CLIPPED_MASS_RATIO = 1.0 + _MAX_CLIPPED_EXCESS_FRACTION
+_MIN_CLIPPED_MASS_SCALE = 1.0 / _MAX_CLIPPED_MASS_RATIO
+_MIN_SAFE_CLIP_NORMALIZATION_SCALE = float(np.sqrt(np.finfo(np.float64).eps))
+_MAX_SAFE_CLIP_NORMALIZATION_SCALE = 1.0 / _MIN_SAFE_CLIP_NORMALIZATION_SCALE
 ReadoutName = Literal[
     "raw",
     "simplex_bank",
@@ -132,6 +138,57 @@ class WarmSimplexDiagnostics:
         successful = self.support_updates[self.support_updates >= 0]
         values, counts = np.unique(successful, return_counts=True)
         return {int(value): int(count) for value, count in zip(values, counts)}
+
+
+@dataclass(frozen=True, slots=True)
+class ClipRenormalizeDiagnostics:
+    """Untimed diagnostics for one clip-and-renormalize trajectory.
+
+    Per-row candidate metrics are populated through ``attempted_rows``. If a
+    guard fails, later entries retain their ``nan`` or ``-1`` sentinel and the
+    public result is transactionally replaced by an exact warm-simplex
+    trajectory. Consequently ``fallback_flags`` is either all false or all
+    true; ``guard_failure_flags`` identifies only the row that triggered the
+    rerun.
+    """
+
+    total_rows: int
+    attempted_rows: int
+    failure_row: int | None
+    failure_reason: str | None
+    positive_masses: FloatArray
+    scale_factors: FloatArray
+    negative_entry_counts: NDArray[np.int64]
+    negative_masses: FloatArray
+    guard_failure_flags: NDArray[np.bool_]
+    fallback_flags: NDArray[np.bool_]
+
+    @property
+    def used_fallback(self) -> bool:
+        return bool(np.any(self.fallback_flags))
+
+    @property
+    def fallback_rows(self) -> int:
+        return int(np.count_nonzero(self.fallback_flags))
+
+    @property
+    def fallback_count(self) -> int:
+        """Alias for ``fallback_rows`` for aggregate reporting."""
+
+        return self.fallback_rows
+
+    @property
+    def fallback_rate(self) -> float:
+        return self.fallback_rows / max(self.total_rows, 1)
+
+    @property
+    def negative_entries(self) -> int:
+        attempted = self.negative_entry_counts[: self.attempted_rows]
+        return int(attempted.sum())
+
+    @property
+    def total_negative_mass(self) -> float:
+        return float(np.sum(self.negative_masses[: self.attempted_rows]))
 
 
 def integer_simplex_quantize(values: FloatArray, total_mass: int) -> FloatArray:
@@ -423,6 +480,297 @@ def warm_simplex_bank_counts_with_diagnostics(
     )
     if diagnostics is None:  # pragma: no cover - fixed by argument above
         raise RuntimeError("warm simplex diagnostics were not collected")
+    return outputs, diagnostics
+
+
+def _try_clip_renormalize_prevalidated(
+    adjusted: FloatArray,
+    total_mass: float,
+    out: FloatArray,
+) -> tuple[bool, float, float, str | None]:
+    """Try one guarded clip-and-renormalize row without allocating arrays."""
+
+    np.maximum(adjusted, 0.0, out=out)
+    positive_mass = float(np.sum(out))
+    if positive_mass <= 0.0:
+        return False, positive_mass, float("nan"), "nonpositive_clipped_mass"
+    if not np.isfinite(positive_mass):
+        return False, positive_mass, float("nan"), "nonfinite_clipped_mass"
+
+    scale = total_mass / positive_mass
+    if (
+        positive_mass > _MAX_CLIPPED_MASS_RATIO * total_mass
+        or scale < _MIN_CLIPPED_MASS_SCALE
+    ):
+        return False, positive_mass, scale, "excess_clipped_mass"
+    if (
+        not np.isfinite(scale)
+        or scale < _MIN_SAFE_CLIP_NORMALIZATION_SCALE
+        or scale > _MAX_SAFE_CLIP_NORMALIZATION_SCALE
+    ):
+        return False, positive_mass, scale, "unsafe_scale_factor"
+
+    np.multiply(out, scale, out=out)
+    if not _correct_projected_mass(out, total_mass):
+        return False, positive_mass, scale, "unsafe_mass_correction"
+    return True, positive_mass, scale, None
+
+
+def _update_clip_renormalize_residual(
+    adjusted: FloatArray,
+    output: FloatArray,
+    residual: FloatArray,
+) -> bool:
+    """Update the feedback ledger and report whether it remains finite."""
+
+    np.subtract(adjusted, output, out=residual)
+    drift = float(np.sum(residual))
+    if not np.isfinite(drift):
+        return False
+    corrected_last = float(residual[-1]) - drift
+    if not np.isfinite(corrected_last):
+        return False
+    residual[-1] = corrected_last
+    return True
+
+
+def _warm_fallback_as_clip_result(
+    values: FloatArray,
+    total_mass: int,
+) -> ReadoutResult:
+    """Rerun the complete trajectory exactly and retain the requested label."""
+
+    exact = warm_simplex_bank_readout(values, total_mass)
+    return ReadoutResult(
+        counts=exact.counts,
+        residuals=exact.residuals,
+        adjusted_inputs=exact.adjusted_inputs,
+        readout_name="clip_renormalize_bank",
+    )
+
+
+def clip_renormalize_bank_readout(
+    raw_counts: FloatArray,
+    total_mass: int,
+) -> ReadoutResult:
+    """Apply guarded clip-and-renormalize with temporal residual feedback.
+
+    Each row adds the previous residual, clips negative entries, and rescales
+    the remaining positive vector to ``total_mass``. The adjusted-minus-output
+    residual is corrected only for floating-point zero-sum drift before being
+    carried forward. If any row cannot be normalized conservatively, the
+    partial result is discarded and the entire trajectory is rerun through
+    the exact warm-simplex bank; the returned trajectory is never a hybrid.
+    """
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    outputs = np.empty_like(values)
+    residuals = np.empty_like(values)
+    adjusted = np.empty_like(values)
+    previous_residual = np.zeros(values.shape[1], dtype=float)
+    mass = float(total_mass)
+
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        for time_index, row in enumerate(values):
+            current = adjusted[time_index]
+            output = outputs[time_index]
+            residual = residuals[time_index]
+            np.add(row, previous_residual, out=current)
+            safe, _, _, _ = _try_clip_renormalize_prevalidated(
+                current,
+                mass,
+                output,
+            )
+            if not safe or not _update_clip_renormalize_residual(
+                current,
+                output,
+                residual,
+            ):
+                return _warm_fallback_as_clip_result(values, total_mass)
+            previous_residual = residual
+
+    return ReadoutResult(
+        counts=outputs,
+        residuals=residuals,
+        adjusted_inputs=adjusted,
+        readout_name="clip_renormalize_bank",
+    )
+
+
+def _clip_renormalize_bank_counts_impl(
+    values: FloatArray,
+    total_mass: int,
+    *,
+    collect_diagnostics: bool,
+) -> tuple[FloatArray, ClipRenormalizeDiagnostics | None]:
+    """Run the counts kernel, optionally collecting untimed candidate metrics."""
+
+    n_steps, n_nodes = values.shape
+    outputs = np.empty_like(values)
+    residual = np.zeros(n_nodes, dtype=float)
+    current = np.empty(n_nodes, dtype=float)
+    positive_masses = (
+        np.full(n_steps, np.nan, dtype=float) if collect_diagnostics else None
+    )
+    scale_factors = (
+        np.full(n_steps, np.nan, dtype=float) if collect_diagnostics else None
+    )
+    negative_entry_counts = (
+        np.full(n_steps, -1, dtype=np.int64) if collect_diagnostics else None
+    )
+    negative_masses = (
+        np.full(n_steps, np.nan, dtype=float) if collect_diagnostics else None
+    )
+    negative_mask = np.empty(n_nodes, dtype=bool) if collect_diagnostics else None
+    failure_row: int | None = None
+    failure_reason: str | None = None
+    attempted_rows = 0
+    mass = float(total_mass)
+
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        for time_index, (row, output) in enumerate(
+            zip(values, outputs, strict=True)
+        ):
+            np.add(row, residual, out=current)
+            attempted_rows = time_index + 1
+            if collect_diagnostics:
+                if (
+                    negative_mask is None
+                    or negative_entry_counts is None
+                    or negative_masses is None
+                ):
+                    raise RuntimeError(
+                        "clip-and-renormalize diagnostic buffers are missing"
+                    )
+                np.less(current, 0.0, out=negative_mask)
+                negative_entry_counts[time_index] = int(
+                    np.count_nonzero(negative_mask)
+                )
+                negative_masses[time_index] = -float(
+                    np.sum(current, where=negative_mask)
+                )
+
+            safe, positive_mass, scale, reason = _try_clip_renormalize_prevalidated(
+                current,
+                mass,
+                output,
+            )
+            if collect_diagnostics:
+                if positive_masses is None or scale_factors is None:
+                    raise RuntimeError(
+                        "clip-and-renormalize diagnostic buffers are missing"
+                    )
+                positive_masses[time_index] = positive_mass
+                scale_factors[time_index] = scale
+            if not safe:
+                failure_row = time_index
+                failure_reason = reason
+                break
+            if not _update_clip_renormalize_residual(current, output, residual):
+                failure_row = time_index
+                failure_reason = "nonfinite_residual"
+                break
+
+    if failure_row is not None:
+        outputs = warm_simplex_bank_counts(values, total_mass)
+
+    diagnostics = None
+    if collect_diagnostics:
+        if (
+            positive_masses is None
+            or scale_factors is None
+            or negative_entry_counts is None
+            or negative_masses is None
+        ):
+            raise RuntimeError("clip-and-renormalize diagnostic buffers are missing")
+        guard_failure_flags = np.zeros(n_steps, dtype=bool)
+        fallback_flags = np.zeros(n_steps, dtype=bool)
+        if failure_row is not None:
+            guard_failure_flags[failure_row] = True
+            fallback_flags.fill(True)
+        diagnostics = ClipRenormalizeDiagnostics(
+            total_rows=n_steps,
+            attempted_rows=attempted_rows,
+            failure_row=failure_row,
+            failure_reason=failure_reason,
+            positive_masses=positive_masses,
+            scale_factors=scale_factors,
+            negative_entry_counts=negative_entry_counts,
+            negative_masses=negative_masses,
+            guard_failure_flags=guard_failure_flags,
+            fallback_flags=fallback_flags,
+        )
+    return outputs, diagnostics
+
+
+def _clip_renormalize_bank_counts_fast(
+    values: FloatArray,
+    total_mass: int,
+) -> FloatArray:
+    """Run the guarded production kernel without diagnostic branches."""
+
+    outputs = np.empty_like(values)
+    residual = np.zeros(values.shape[1], dtype=float)
+    current = np.empty(values.shape[1], dtype=float)
+    mass = float(total_mass)
+    maximum_clipped_mass = _MAX_CLIPPED_MASS_RATIO * mass
+    minimum_scale = _MIN_CLIPPED_MASS_SCALE
+    maximum_scale = _MAX_SAFE_CLIP_NORMALIZATION_SCALE
+
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        for row, output in zip(values, outputs, strict=True):
+            np.add(row, residual, out=current)
+            np.maximum(current, 0.0, out=output)
+            positive_mass = float(np.sum(output))
+            if (
+                positive_mass <= 0.0
+                or not np.isfinite(positive_mass)
+                or positive_mass > maximum_clipped_mass
+            ):
+                return warm_simplex_bank_counts(values, total_mass)
+            scale = mass / positive_mass
+            if (
+                not np.isfinite(scale)
+                or scale < minimum_scale
+                or scale > maximum_scale
+            ):
+                return warm_simplex_bank_counts(values, total_mass)
+            np.multiply(output, scale, out=output)
+            if not _correct_projected_mass(output, mass):
+                return warm_simplex_bank_counts(values, total_mass)
+            np.subtract(current, output, out=residual)
+            drift = float(np.sum(residual))
+            corrected_last = float(residual[-1]) - drift
+            if not np.isfinite(corrected_last):
+                return warm_simplex_bank_counts(values, total_mass)
+            residual[-1] = corrected_last
+    return outputs
+
+
+def clip_renormalize_bank_counts(
+    raw_counts: FloatArray,
+    total_mass: int,
+) -> FloatArray:
+    """Return guarded clip-and-renormalize counts without diagnostic arrays."""
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    return _clip_renormalize_bank_counts_fast(values, total_mass)
+
+
+def clip_renormalize_bank_counts_with_diagnostics(
+    raw_counts: FloatArray,
+    total_mass: int,
+) -> tuple[FloatArray, ClipRenormalizeDiagnostics]:
+    """Return counts and untimed clip, scale, and fallback diagnostics."""
+
+    values = _validate_trajectory(raw_counts, total_mass)
+    outputs, diagnostics = _clip_renormalize_bank_counts_impl(
+        values,
+        total_mass,
+        collect_diagnostics=True,
+    )
+    if diagnostics is None:  # pragma: no cover - fixed by argument above
+        raise RuntimeError("clip-and-renormalize diagnostics were not collected")
     return outputs, diagnostics
 
 

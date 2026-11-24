@@ -118,9 +118,11 @@ The next work should target the two costs that now dominate:
 1. The first readout experiment replaced most sorts with a warm exact
    active-set projection. It reduced readout time by 5--14% and prepared
    end-to-end time by 4--8%, but the modal pipeline remains 29--36% slower than
-   the exact vectorized walk. The next candidate is clip-and-renormalize with
-   residual feedback, validated against the warm exact reference. See
-   [Warm-started exact simplex readout](WARM_SIMPLEX_READOUT.md).
+   the exact vectorized walk. Clip-and-renormalize then removed another
+   39--40% of readout time and preserved moment accuracy, but remained 6.6%
+   slower than exact at 201 nodes and worsened marginal histogram divergence.
+   See [Warm-started exact simplex readout](WARM_SIMPLEX_READOUT.md) and
+   [Clip-and-renormalize residual feedback](CLIP_RENORMALIZE_READOUT.md).
 2. Stream or apply the full innovation covariance as an operator and retain
    only the selected gain/factor blocks. This should remove the prototype's
    full-reference duplication and make setup/storage genuinely reduced-order.
