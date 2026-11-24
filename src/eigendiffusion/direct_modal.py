@@ -70,6 +70,57 @@ def _cosine_basis(config: DiffusionConfig, n_modes: int | None) -> Eigenbasis:
     return Eigenbasis(eigenvalues=eigenvalues, eigenvectors=vectors)
 
 
+def _modal_transition_diagonal(config: DiffusionConfig, basis: Eigenbasis) -> FloatArray:
+    diagonal = 1.0 - config.dt * basis.eigenvalues
+    if np.min(diagonal) < -1.0e-12:
+        raise ValueError(
+            "The timestep is too large for the fastest retained mode: "
+            "1 - lambda * dt must be nonnegative."
+        )
+    return diagonal
+
+
+def _modal_covariance(
+    probability: FloatArray, vectors: FloatArray, particle_count: float
+) -> FloatArray:
+    single_mean = probability @ vectors
+    single_second_moment = vectors.T @ (probability[:, None] * vectors)
+    current = particle_count * (single_second_moment - np.outer(single_mean, single_mean))
+    covariance = 0.5 * (current + current.T)
+    covariance[0, :] = 0.0
+    covariance[:, 0] = 0.0
+    return covariance
+
+
+def _innovation_factor(
+    previous: FloatArray,
+    following: FloatArray,
+    diagonal: FloatArray,
+    psd_tolerance: float,
+    time_index: int,
+) -> FloatArray:
+    """Square root of the PSD-cleaned modal innovation for one transition."""
+
+    propagated = diagonal[:, None] * previous * diagonal[None, :]
+    current = following - propagated
+    current = 0.5 * (current + current.T)
+    current[0, :] = 0.0
+    current[:, 0] = 0.0
+    eigenvalues, eigenvectors = np.linalg.eigh(current)
+    scale = max(float(np.max(np.abs(eigenvalues))), 1.0)
+    if float(eigenvalues[0]) < -psd_tolerance * scale:
+        raise RuntimeError(
+            "Innovation covariance is not positive semidefinite at "
+            f"transition {time_index}: minimum eigenvalue "
+            f"{eigenvalues[0]:.6e}."
+        )
+
+    clipped = np.clip(eigenvalues, 0.0, None)
+    factor = eigenvectors * np.sqrt(clipped)[None, :]
+    factor[0, :] = 0.0
+    return factor
+
+
 class DirectModalGaussianDiffusion:
     """Exact-moment Gaussian transition model in ``M`` retained modes.
 
@@ -102,13 +153,8 @@ class DirectModalGaussianDiffusion:
         self.config = config
         self.basis = _cosine_basis(config, n_modes)
         self._transition = random_walk_transition_matrix(config)
-        self._one_step_factors = 1.0 - config.dt * self.basis.eigenvalues
+        self._one_step_factors = _modal_transition_diagonal(config, self.basis)
         self._psd_tolerance = float(psd_tolerance)
-        if np.min(self._one_step_factors) < -1.0e-12:
-            raise ValueError(
-                "The timestep is too large for the fastest retained mode: "
-                "1 - lambda * dt must be nonnegative."
-            )
 
         self._single_particle_probabilities = self._prepare_probabilities()
         self._modal_means, self._modal_covariances = self._prepare_modal_moments()
@@ -289,19 +335,14 @@ class DirectModalGaussianDiffusion:
             dtype=float,
         )
 
-        for time_index, probability in enumerate(self._single_particle_probabilities):
-            single_mean = probability @ vectors
-            single_second_moment = vectors.T @ (probability[:, None] * vectors)
-            current = particle_count * (
-                single_second_moment - np.outer(single_mean, single_mean)
+        for time_index in range(1, self.config.n_steps):
+            covariance[time_index] = _modal_covariance(
+                self._single_particle_probabilities[time_index], vectors, particle_count
             )
-            covariance[time_index] = 0.5 * (current + current.T)
 
         # The initial impulse and constant mass mode are structurally
         # deterministic.  Do not retain dense-formula cancellation noise.
         covariance[0] = 0.0
-        covariance[:, 0, :] = 0.0
-        covariance[:, :, 0] = 0.0
         modal_means[:, 0] = modal_means[0, 0]
         return modal_means, covariance
 
@@ -315,44 +356,21 @@ class DirectModalGaussianDiffusion:
         diagonal = self._one_step_factors
 
         for time_index in range(n_transitions):
-            propagated = (
-                diagonal[:, None]
-                * self._modal_covariances[time_index]
-                * diagonal[None, :]
+            factor = _innovation_factor(
+                self._modal_covariances[time_index],
+                self._modal_covariances[time_index + 1],
+                diagonal,
+                self._psd_tolerance,
+                time_index,
             )
-            current = self._modal_covariances[time_index + 1] - propagated
-            current = 0.5 * (current + current.T)
-            current[0, :] = 0.0
-            current[:, 0] = 0.0
-            factor, psd_covariance = self._singular_psd_factor(current, time_index)
+            psd_covariance = factor @ factor.T
+            psd_covariance = 0.5 * (psd_covariance + psd_covariance.T)
+            psd_covariance[0, :] = 0.0
+            psd_covariance[:, 0] = 0.0
             covariance[time_index] = psd_covariance
             factors[time_index] = factor
 
         return covariance, factors
-
-    def _singular_psd_factor(
-        self,
-        covariance: FloatArray,
-        time_index: int,
-    ) -> tuple[FloatArray, FloatArray]:
-        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-        scale = max(float(np.max(np.abs(eigenvalues))), 1.0)
-        tolerance = self._psd_tolerance * scale
-        if float(eigenvalues[0]) < -tolerance:
-            raise RuntimeError(
-                "Innovation covariance is not positive semidefinite at "
-                f"transition {time_index}: minimum eigenvalue "
-                f"{eigenvalues[0]:.6e}."
-            )
-
-        clipped = np.clip(eigenvalues, 0.0, None)
-        factor = eigenvectors * np.sqrt(clipped)[None, :]
-        factor[0, :] = 0.0
-        psd_covariance = factor @ factor.T
-        psd_covariance = 0.5 * (psd_covariance + psd_covariance.T)
-        psd_covariance[0, :] = 0.0
-        psd_covariance[:, 0] = 0.0
-        return factor, psd_covariance
 
     def _validate_step(self, step: int) -> int:
         if not isinstance(step, Integral):

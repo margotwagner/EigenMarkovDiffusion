@@ -5,6 +5,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+import eigendiffusion.innovation_completion as innovation_completion
 from eigendiffusion.config import DiffusionConfig
 from eigendiffusion.direct_modal import DirectModalGaussianDiffusion
 from eigendiffusion.innovation_completion import (
@@ -301,22 +302,81 @@ def test_batched_sampler_skips_padding_when_step_ranks_vary():
     )
 
 
-@pytest.mark.parametrize("retained,rank", [(3, None), (3, 1), (1, None), (7, None)])
-def test_compact_runtime_factory_reproduces_batched_trajectories_and_rng(retained, rank):
+@pytest.mark.parametrize("retained,rank", [(3, None), (3, 1), (1, None), (7, None), (5, 100)])
+def test_streaming_runtime_matches_full_history_factors_paths_and_rng(retained, rank):
     config = _config(impulse_index=3)
-    settings = dict(retained_modes=retained, conditional_rank=rank)
-    model = InnovationConditionedModalCompleter(config, **settings)
+    settings = dict(
+        retained_modes=retained,
+        conditional_rank=rank,
+        pseudoinverse_tolerance=1e-9,
+        psd_tolerance=2e-10,
+    )
+    oracle = PreparedInnovationCompletion.from_full_history_config(config, **settings)
     compact = PreparedInnovationCompletion.from_config(config, **settings)
+    np.testing.assert_array_equal(compact.sampler.joint_factors, oracle.sampler.joint_factors)
+    np.testing.assert_array_equal(compact.sampler.selected_ranks, oracle.sampler.selected_ranks)
+    assert compact.sampler._active_columns is oracle.sampler._active_columns is None
+    assert compact.sampler.latent_count == oracle.sampler.latent_count
+    assert compact.nbytes == oracle.nbytes
     batch_rng = np.random.default_rng(431)
     compact_rng = np.random.default_rng(431)
     for _ in range(2):
-        expected = model.run_batched(batch_rng)
+        expected = oracle.run(batch_rng)
         actual = compact.run(compact_rng)
         np.testing.assert_array_equal(actual.modal_amplitudes, expected.modal_amplitudes)
         np.testing.assert_array_equal(actual.spatial_counts, expected.spatial_counts)
         assert actual.basis is compact.basis
         assert actual.retained_modes == expected.retained_modes
         assert compact_rng.bit_generator.state == batch_rng.bit_generator.state
+
+
+def test_streaming_build_uses_only_transition_local_full_factors(monkeypatch):
+    def history_forbidden(*args, **kwargs):
+        pytest.fail("streaming setup constructed a diagnostic model or conditioning record")
+
+    monkeypatch.setattr(InnovationConditionedModalCompleter, "__init__", history_forbidden)
+    monkeypatch.setattr(DirectModalGaussianDiffusion, "__init__", history_forbidden)
+    monkeypatch.setattr(innovation_completion, "InnovationConditioningStep", history_forbidden)
+
+    covariances = []
+    probabilities = []
+    modal_covariance = innovation_completion._modal_covariance
+
+    def check_moment_lifetimes(probability, vectors, particle_count):
+        assert all(ref() is None for ref in covariances[:-1])
+        assert all(ref() is None for ref in probabilities)
+        current = modal_covariance(probability, vectors, particle_count)
+        covariances.append(weakref.ref(current))
+        probabilities.append(weakref.ref(probability))
+        return current
+
+    monkeypatch.setattr(innovation_completion, "_modal_covariance", check_moment_lifetimes)
+    previous_factor = None
+    pack = innovation_completion._pack_conditioned_innovation
+
+    def check_factor_lifetime(packed, full_factor, *settings):
+        nonlocal previous_factor
+        assert previous_factor is None or previous_factor() is None
+        previous_factor = weakref.ref(full_factor)
+        pack(packed, full_factor, *settings)
+
+    monkeypatch.setattr(
+        innovation_completion, "_pack_conditioned_innovation", check_factor_lifetime
+    )
+    compact = PreparedInnovationCompletion.from_config(_config(), retained_modes=3)
+    assert previous_factor is not None and previous_factor() is None
+    assert len(probabilities) == len(covariances) == _config().n_steps - 1
+    assert all(ref() is None for ref in covariances + probabilities)
+    arrays = (
+        compact.initial_modal,
+        compact.one_step_factors,
+        compact.basis.eigenvalues,
+        compact.basis.eigenvectors,
+        compact.sampler.joint_factors,
+        compact.sampler.selected_ranks,
+    )
+    assert all(a.flags.owndata and not a.flags.writeable for a in arrays)
+    assert compact.nbytes == sum(a.nbytes for a in arrays)
 
 
 def test_compact_runtime_releases_setup_histories_and_keeps_owned_readonly_arrays():
@@ -402,6 +462,15 @@ def test_batched_sampler_matches_stepwise_at_representative_dimension():
         atol=1.0e-8,
     )
     sampler = model.prepare_batched_sampler()
+    compact = PreparedInnovationCompletion.from_config(
+        config, retained_modes=75, conditional_rank=25
+    )
+    np.testing.assert_array_equal(compact.sampler.joint_factors, sampler.joint_factors)
+    stream_rng = np.random.default_rng(431)
+    streamed = compact.run(stream_rng)
+    np.testing.assert_array_equal(streamed.modal_amplitudes, actual.modal_amplitudes)
+    np.testing.assert_array_equal(streamed.spatial_counts, actual.spatial_counts)
+    assert stream_rng.bit_generator.state == batch_rng.bit_generator.state
     packed_covariances = np.stack(
         [factor @ factor.T for factor in sampler.joint_factors]
     )

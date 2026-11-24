@@ -9,6 +9,7 @@ import os
 import platform
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from itertools import permutations
 from pathlib import Path
@@ -27,6 +28,7 @@ from .compiled_simplex import (
 )
 from .config import DiffusionConfig
 from .innovation_completion import (
+    InnovationConditionedCompletionResult,
     InnovationConditionedModalCompleter,
     PreparedInnovationCompletion,
 )
@@ -63,6 +65,7 @@ _THREAD_VARIABLES = (
     "NUMEXPR_NUM_THREADS",
     "NUMBA_NUM_THREADS",
 )
+_RunTrajectory = Callable[[np.random.Generator], InnovationConditionedCompletionResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +123,7 @@ def _prepare_case(
                 row["compact_conversion_seconds"] = perf_counter() - start
             else:
                 start = perf_counter()
-                runtime = PreparedInnovationCompletion.from_config(config, **options)
+                runtime = PreparedInnovationCompletion.from_full_history_config(config, **options)
                 row["cold_prepared_setup_seconds"] = perf_counter() - start
             samples.append(row)
         if repeat + 1 < spec.setup_repeats:
@@ -190,8 +193,8 @@ def _release_references(
 def _diagnose_paths(
     spec: CompactRuntimeBenchmarkSpec,
     config: DiffusionConfig,
-    builder: InnovationConditionedModalCompleter,
-    runtime: PreparedInnovationCompletion,
+    run_reference: _RunTrajectory,
+    run_candidate: _RunTrajectory,
 ) -> dict[str, object]:
     maximum_errors = dict.fromkeys(("modal", "spatial", "physical_count"), 0.0)
     exact_matches = dict.fromkeys(maximum_errors, 0)
@@ -203,15 +206,15 @@ def _diagnose_paths(
     matching_rng_states = 0
     for repeat in range(spec.diagnostic_trajectories):
         sequence = np.random.SeedSequence([spec.seed, config.n_nodes, 2, repeat])
-        batched_rng = np.random.default_rng(sequence)
-        compact_rng = np.random.default_rng(sequence)
-        batched = builder.run_batched(batched_rng)
-        compact = runtime.run(compact_rng)
+        reference_rng = np.random.default_rng(sequence)
+        candidate_rng = np.random.default_rng(sequence)
+        reference = run_reference(reference_rng)
+        candidate = run_candidate(candidate_rng)
         matching_rng_states += int(
-            batched_rng.bit_generator.state == compact_rng.bit_generator.state
+            reference_rng.bit_generator.state == candidate_rng.bit_generator.state
         )
         physical_counts = []
-        for result in (batched, compact):
+        for result in (reference, candidate):
             raw = result.spatial_counts
             _validate_spatial(raw, config, physical=False)
             counts = compiled_warm_simplex_bank_counts(raw, config.n_particles)
@@ -227,21 +230,21 @@ def _diagnose_paths(
             minimum_physical_count = min(minimum_physical_count, float(np.min(counts)))
             physical_counts.append(counts)
 
-        batched_counts, compact_counts = physical_counts
+        reference_counts, candidate_counts = physical_counts
         for label, left, right in (
-            ("modal", batched.modal_amplitudes, compact.modal_amplitudes),
-            ("spatial", batched.spatial_counts, compact.spatial_counts),
-            ("physical_count", batched_counts, compact_counts),
+            ("modal", reference.modal_amplitudes, candidate.modal_amplitudes),
+            ("spatial", reference.spatial_counts, candidate.spatial_counts),
+            ("physical_count", reference_counts, candidate_counts),
         ):
             maximum_errors[label] = max(maximum_errors[label], float(np.max(np.abs(left - right))))
             exact_matches[label] += int(np.array_equal(left, right))
 
-        support_mismatch = (batched_counts > 0) != (compact_counts > 0)
+        support_mismatch = (reference_counts > 0) != (candidate_counts > 0)
         strict_support_mismatches += int(np.count_nonzero(support_mismatch))
         tolerant_support_mismatches += int(
             np.count_nonzero(
                 support_mismatch
-                & (np.maximum(batched_counts, compact_counts) > _SUPPORT_TOLERANCE)
+                & (np.maximum(reference_counts, candidate_counts) > _SUPPORT_TOLERANCE)
             )
         )
 
@@ -286,13 +289,23 @@ def _rss_worker() -> None:
     request = json.load(sys.stdin)
     config = DiffusionConfig(**request["config"])
     options = request["options"]
+
+    def prepare() -> InnovationConditionedModalCompleter | PreparedInnovationCompletion:
+        if request["method"] == BATCHED_METHOD:
+            builder = InnovationConditionedModalCompleter(config, **options)
+            builder.prepare_batched_sampler()
+            return builder
+        return PreparedInnovationCompletion.from_full_history_config(config, **options)
+
+    _print_setup_rss(prepare)
+
+
+def _print_setup_rss(prepare: Callable[[], object]) -> None:
+    """Print process memory before and after preparation while its result is live."""
+
     gc.collect()
     baseline_rss, _ = _resident_bytes()
-    if request["method"] == BATCHED_METHOD:
-        retained = InnovationConditionedModalCompleter(config, **options)
-        retained.prepare_batched_sampler()
-    else:
-        retained = PreparedInnovationCompletion.from_config(config, **options)
+    retained = prepare()
     gc.collect()
     post_setup_rss, peak_setup_rss = _resident_bytes()
     del retained
@@ -312,6 +325,12 @@ def _rss_worker() -> None:
 def _isolated_rss(
     config: DiffusionConfig,
     case: CompactRuntimeBenchmarkCase,
+    *,
+    methods: tuple[tuple[str, str], ...] = (
+        ("batched", BATCHED_METHOD),
+        ("compact", COMPACT_METHOD),
+    ),
+    worker_module: str = "eigendiffusion.compact_runtime_benchmark",
 ) -> dict[str, object]:
     if not Path("/proc/self/status").is_file():
         return {}
@@ -322,10 +341,10 @@ def _isolated_rss(
     command = [
         sys.executable,
         "-c",
-        "from eigendiffusion.compact_runtime_benchmark import _rss_worker; _rss_worker()",
+        f"from {worker_module} import _rss_worker; _rss_worker()",
     ]
     resources: dict[str, object] = {}
-    for label, method in (("batched", BATCHED_METHOD), ("compact", COMPACT_METHOD)):
+    for label, method in methods:
         request = {
             "config": asdict(config),
             "options": {
@@ -350,13 +369,21 @@ def _isolated_rss(
 def _time_trajectories(
     spec: CompactRuntimeBenchmarkSpec,
     config: DiffusionConfig,
-    builder: InnovationConditionedModalCompleter,
-    runtime: PreparedInnovationCompletion,
+    samplers: dict[str, _RunTrajectory],
 ) -> list[dict[str, object]]:
-    samplers = {BATCHED_METHOD: builder.run_batched, COMPACT_METHOD: runtime.run}
     protocols = (
-        (_COMPLETION, _MODAL_ORDERS, spec.completion_warmups, spec.completion_repeats),
-        (_END_TO_END, _END_TO_END_ORDERS, spec.end_to_end_warmups, spec.end_to_end_repeats),
+        (
+            _COMPLETION,
+            tuple(permutations(samplers)),
+            spec.completion_warmups,
+            spec.completion_repeats,
+        ),
+        (
+            _END_TO_END,
+            tuple(permutations((*samplers, EXACT_METHOD))),
+            spec.end_to_end_warmups,
+            spec.end_to_end_repeats,
+        ),
     )
     rows: list[dict[str, object]] = []
     for component_index, (component, orders, warmups, repeats) in enumerate(protocols):
@@ -395,13 +422,12 @@ def _time_trajectories(
     return rows
 
 
-def _summarize_case(
+def _summarize_timings(
     spec: CompactRuntimeBenchmarkSpec,
     config: DiffusionConfig,
     timing_rows: list[dict[str, object]],
-    resources: dict[str, object],
-    diagnostics: dict[str, object],
-) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
+    protocols: tuple[tuple[str, str, str, str], ...],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[tuple[str, str], float]]:
     groups: dict[tuple[str, str], list[float]] = {}
     for row in timing_rows:
         key = str(row["component"]), str(row["method"])
@@ -421,12 +447,6 @@ def _summarize_case(
         for (component, method), seconds in samples.items()
     ]
 
-    protocols = (
-        (_COMPLETION, BATCHED_METHOD, COMPACT_METHOD, "compact_over_batched"),
-        (_END_TO_END, BATCHED_METHOD, COMPACT_METHOD, "compact_over_batched"),
-        (_END_TO_END, EXACT_METHOD, COMPACT_METHOD, "compact_over_exact"),
-        (_END_TO_END, EXACT_METHOD, BATCHED_METHOD, "batched_over_exact"),
-    )
     comparisons = []
     for offset, (component, baseline, candidate, label) in enumerate(protocols):
         interval = _paired_ratio_interval(
@@ -446,6 +466,23 @@ def _summarize_case(
                 "speedup": 1.0 / interval["median_ratio"],
             }
         )
+    return timings, comparisons, medians
+
+
+def _summarize_case(
+    spec: CompactRuntimeBenchmarkSpec,
+    config: DiffusionConfig,
+    timing_rows: list[dict[str, object]],
+    resources: dict[str, object],
+    diagnostics: dict[str, object],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
+    protocols = (
+        (_COMPLETION, BATCHED_METHOD, COMPACT_METHOD, "compact_over_batched"),
+        (_END_TO_END, BATCHED_METHOD, COMPACT_METHOD, "compact_over_batched"),
+        (_END_TO_END, EXACT_METHOD, COMPACT_METHOD, "compact_over_exact"),
+        (_END_TO_END, EXACT_METHOD, BATCHED_METHOD, "batched_over_exact"),
+    )
+    timings, comparisons, medians = _summarize_timings(spec, config, timing_rows, protocols)
     completion, end_to_end, exact, _ = comparisons
     gates = {
         "n_nodes": config.n_nodes,
@@ -516,11 +553,13 @@ def run_compact_runtime_benchmark(
         gc_was_enabled = gc.isenabled()
         gc.disable()
         try:
-            case_samples = _time_trajectories(spec, config, builder, runtime)
+            case_samples = _time_trajectories(
+                spec, config, {BATCHED_METHOD: builder.run_batched, COMPACT_METHOD: runtime.run}
+            )
         finally:
             if gc_was_enabled:
                 gc.enable()
-        case_diagnostics = _diagnose_paths(spec, config, builder, runtime)
+        case_diagnostics = _diagnose_paths(spec, config, builder.run_batched, runtime.run)
         release_references = _release_references(builder)
         del builder
         gc.collect()

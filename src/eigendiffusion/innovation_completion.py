@@ -7,8 +7,7 @@ uses the exact Gaussian conditional transition
 ``eta_U | eta_R ~ N(Q_UR Q_RR^+ eta_R,
                      Q_UU - Q_UR Q_RR^+ Q_RU)``.
 
-All covariance blocks come from one full-rank
-:class:`~eigendiffusion.direct_modal.DirectModalGaussianDiffusion` instance.
+All covariance blocks come from the same full-rank direct-modal factor.
 This is important: singular PSD cleanup performed independently at two ranks
 need not produce exactly nested numerical factors.  The constant mass mode is
 retained, deterministic, and handled by the pseudoinverse null space.
@@ -22,10 +21,113 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .config import DiffusionConfig
-from .direct_modal import DirectModalGaussianDiffusion
+from .direct_modal import (
+    DirectModalGaussianDiffusion,
+    _cosine_basis,
+    _innovation_factor,
+    _modal_covariance,
+    _modal_transition_diagonal,
+)
 from .operators import Eigenbasis
+from .references import random_walk_transition_matrix
 
 FloatArray = NDArray[np.float64]
+
+
+def _completion_ranks(
+    n_nodes: int,
+    retained_modes: int,
+    conditional_rank: int | None,
+    pseudoinverse_tolerance: float,
+    psd_tolerance: float,
+) -> tuple[int, int]:
+    if not 1 <= retained_modes <= n_nodes:
+        raise ValueError("retained_modes must lie in [1, n_nodes]")
+    if conditional_rank is not None and conditional_rank <= 0:
+        raise ValueError("conditional_rank must be positive when provided")
+    if pseudoinverse_tolerance < 0.0:
+        raise ValueError("pseudoinverse_tolerance must be nonnegative")
+    if psd_tolerance <= 0.0:
+        raise ValueError("psd_tolerance must be positive")
+    retained = int(retained_modes)
+    unresolved = n_nodes - retained
+    rank = unresolved if conditional_rank is None else min(int(conditional_rank), unresolved)
+    return retained, rank
+
+
+def _split_innovation_factor(
+    joint_factor: FloatArray, retained: int, pseudoinverse_tolerance: float
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    """Split Q = F F.T into retained factor, conditional gain and residual factor.
+
+    For retained rows A and unresolved rows B, the SVD A = U S V.T
+    separates observed and unobserved latent normals. G = B V_r S_r^-1 U_r.T
+    is the conditional gain, and B V_null factors the Schur complement
+    without subtracting nearly equal covariances at rank-deficient steps.
+    """
+
+    retained_rows = joint_factor[:retained]
+    unresolved_rows = joint_factor[retained:]
+    left, singular_values, right_transpose = np.linalg.svd(retained_rows, full_matrices=True)
+    maximum = float(singular_values[0])
+    active = (
+        singular_values > np.sqrt(pseudoinverse_tolerance) * maximum
+        if maximum > 0.0
+        else np.zeros_like(singular_values, dtype=bool)
+    )
+    active_count = int(np.count_nonzero(active))
+    retained_factor = np.zeros((retained, retained), dtype=float)
+    if active_count:
+        retained_factor[:, :active_count] = left[:, active] * singular_values[active][None, :]
+        observed_right = right_transpose[:retained][active].T
+        gain = (
+            unresolved_rows @ observed_right / singular_values[active][None, :]
+        ) @ left[:, active].T
+    else:
+        gain = np.zeros((len(unresolved_rows), retained), dtype=float)
+
+    right_active = np.zeros(joint_factor.shape[1], dtype=bool)
+    right_active[:retained] = active
+    null_right = right_transpose[~right_active].T
+    return retained_factor, gain, unresolved_rows @ null_right
+
+
+def _truncate_residual_factor(
+    residual_factor: FloatArray, selected: int
+) -> tuple[FloatArray, FloatArray]:
+    vectors, singular_values, _ = np.linalg.svd(residual_factor, full_matrices=False)
+    available = min(selected, singular_values.size)
+    conditional_factor = np.zeros((len(residual_factor), selected), dtype=float)
+    conditional_factor[:, :available] = vectors[:, :available] * singular_values[:available]
+    return conditional_factor, singular_values
+
+
+def _populate_joint_factor(
+    factor: FloatArray,
+    retained_factor: FloatArray,
+    gain: FloatArray,
+    conditional_factor: FloatArray,
+) -> None:
+    """Fill a zero-initialized retained-plus-conditional factor in draw order."""
+
+    retained = len(retained_factor)
+    factor[:retained, :retained] = retained_factor
+    factor[retained:, :retained] = gain @ retained_factor
+    factor[retained:, retained:] = conditional_factor
+
+
+def _pack_conditioned_innovation(
+    packed: FloatArray,
+    full_factor: FloatArray,
+    retained: int,
+    rank: int,
+    pseudoinverse_tolerance: float,
+) -> None:
+    retained_factor, gain, residual = _split_innovation_factor(
+        full_factor, retained, pseudoinverse_tolerance
+    )
+    conditional_factor, _ = _truncate_residual_factor(residual, rank)
+    _populate_joint_factor(packed, retained_factor, gain, conditional_factor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +246,65 @@ class PreparedInnovationCompletion:
         pseudoinverse_tolerance: float = 1.0e-12,
         psd_tolerance: float = 1.0e-10,
     ) -> PreparedInnovationCompletion:
-        """Prepare a runtime using a temporary full conditioning model."""
+        """Pack one transition at a time with O(n_nodes**2) setup scratch."""
+
+        retained, rank = _completion_ranks(
+            config.n_nodes, retained_modes, conditional_rank, pseudoinverse_tolerance, psd_tolerance
+        )
+        pseudoinverse_tolerance = float(pseudoinverse_tolerance)
+        psd_tolerance = float(psd_tolerance)
+        basis = _cosine_basis(config, config.n_nodes)
+        transition = random_walk_transition_matrix(config)
+        diagonal = _modal_transition_diagonal(config, basis)
+        particle_count = float(config.n_particles)
+        raw_probability = np.zeros(config.n_nodes, dtype=float)
+        raw_probability[config.impulse_index] = 1.0
+        initial_modal = particle_count * basis.eigenvectors[config.impulse_index]
+        previous = np.zeros((config.n_nodes, config.n_nodes), dtype=float)
+        width = retained + rank
+        joint = np.zeros((config.n_steps - 1, config.n_nodes, width), dtype=float)
+        for time_index, packed in enumerate(joint):
+            # The reference advances the raw walk for all times before it clips
+            # and normalizes rows. Keep the normalized row out of the recurrence.
+            raw_probability = raw_probability @ transition
+            probability = np.clip(raw_probability, 0.0, 1.0)
+            probability /= probability.sum()
+            following = _modal_covariance(probability, basis.eigenvectors, particle_count)
+            _pack_conditioned_innovation(
+                packed,
+                _innovation_factor(previous, following, diagonal, psd_tolerance, time_index),
+                retained,
+                rank,
+                pseudoinverse_tolerance,
+            )
+            previous = following
+
+        ranks = np.full(len(joint), rank, dtype=np.intp)
+        for array in (joint, ranks, initial_modal, diagonal, basis.eigenvectors, basis.eigenvalues):
+            array.setflags(write=False)
+        return PreparedInnovationCompletion(
+            initial_modal=initial_modal,
+            one_step_factors=diagonal,
+            basis=basis,
+            retained_modes=retained,
+            sampler=PreparedInnovationSampler(
+                joint_factors=joint,
+                selected_ranks=ranks,
+                latent_count=len(joint) * width,
+                _active_columns=None,
+            ),
+        )
+
+    @staticmethod
+    def from_full_history_config(
+        config: DiffusionConfig,
+        *,
+        retained_modes: int,
+        conditional_rank: int | None = None,
+        pseudoinverse_tolerance: float = 1.0e-12,
+        psd_tolerance: float = 1.0e-10,
+    ) -> PreparedInnovationCompletion:
+        """Prepare a reference runtime using the full conditioning histories."""
 
         builder = InnovationConditionedModalCompleter(
             config,
@@ -208,24 +368,11 @@ class InnovationConditionedModalCompleter:
         pseudoinverse_tolerance: float = 1.0e-12,
         psd_tolerance: float = 1.0e-10,
     ) -> None:
-        if not 1 <= retained_modes <= config.n_nodes:
-            raise ValueError("retained_modes must lie in [1, n_nodes]")
-        if conditional_rank is not None and conditional_rank <= 0:
-            raise ValueError("conditional_rank must be positive when provided")
-        if pseudoinverse_tolerance < 0.0:
-            raise ValueError("pseudoinverse_tolerance must be nonnegative")
-        if psd_tolerance <= 0.0:
-            raise ValueError("psd_tolerance must be positive")
-
         self.config = config
-        self.retained_modes = int(retained_modes)
-        self.unresolved_modes = config.n_nodes - self.retained_modes
-        requested_rank = (
-            self.unresolved_modes
-            if conditional_rank is None
-            else int(conditional_rank)
+        self.retained_modes, self.conditional_rank = _completion_ranks(
+            config.n_nodes, retained_modes, conditional_rank, pseudoinverse_tolerance, psd_tolerance
         )
-        self.conditional_rank = min(requested_rank, self.unresolved_modes)
+        self.unresolved_modes = config.n_nodes - self.retained_modes
         self.pseudoinverse_tolerance = float(pseudoinverse_tolerance)
         self.psd_tolerance = float(psd_tolerance)
 
@@ -410,12 +557,9 @@ class InnovationConditionedModalCompleter:
     ) -> None:
         """Fill one retained-plus-conditional innovation factor in place."""
 
-        retained = self.retained_modes
-        factor[:retained, :retained] = step.retained_factor
-        factor[retained:, :retained] = (
-            step.conditional_gain @ step.retained_factor
+        _populate_joint_factor(
+            factor, step.retained_factor, step.conditional_gain, step.conditional_factor
         )
-        factor[retained:, retained:] = step.conditional_factor
 
     def run_stepwise(
         self,
@@ -531,80 +675,19 @@ class InnovationConditionedModalCompleter:
         self,
         joint_factor: FloatArray,
     ) -> InnovationConditioningStep:
-        retained = self.retained_modes
-
-        # Condition the *square root* Q = F F.T instead of subtracting two
-        # nearly equal covariance matrices.  If A and B are the retained and
-        # unresolved rows of F, an SVD A = U S V.T splits the latent normal
-        # into the row space observed by the retained innovation and its
-        # orthogonal null space.  Consequently
-        #
-        #   G = B V_r S_r^-1 U_r.T
-        #   F_(u|r) = B V_null
-        #
-        # are algebraically identical to Q_UR Q_RR^+ and its Schur
-        # complement, but F_(u|r) F_(u|r).T is PSD by construction.  This is
-        # important for early, strongly rank-deficient transitions.
-        retained_rows = joint_factor[:retained]
-        unresolved_rows = joint_factor[retained:]
-        left, singular_values, right_transpose = np.linalg.svd(
-            retained_rows,
-            full_matrices=True,
-        )
-        maximum = float(singular_values[0]) if singular_values.size else 0.0
-        active = (
-            singular_values
-            > np.sqrt(self.pseudoinverse_tolerance) * maximum
-            if maximum > 0.0
-            else np.zeros_like(singular_values, dtype=bool)
-        )
-
-        retained_factor = np.zeros((retained, retained), dtype=float)
-        active_count = int(np.count_nonzero(active))
-        if active_count:
-            retained_factor[:, :active_count] = (
-                left[:, active] * singular_values[active][None, :]
-            )
-        retained_covariance = retained_factor @ retained_factor.T
-
-        if active_count:
-            observed_right = right_transpose[:retained][active].T
-            gain = (
-                unresolved_rows @ observed_right
-                / singular_values[active][None, :]
-            ) @ left[:, active].T
-        else:
-            gain = np.zeros(
-                (self.unresolved_modes, self.retained_modes),
-                dtype=float,
-            )
-
-        right_active = np.zeros(self.config.n_nodes, dtype=bool)
-        right_active[:retained] = active
-        null_right = right_transpose[~right_active].T
-        residual_factor = unresolved_rows @ null_right
-        conditional_vectors, conditional_singular_values, _ = np.linalg.svd(
-            residual_factor,
-            full_matrices=False,
-        )
-        conditional_covariance = residual_factor @ residual_factor.T
-        conditional_covariance = 0.5 * (
-            conditional_covariance + conditional_covariance.T
+        retained_factor, gain, residual_factor = _split_innovation_factor(
+            joint_factor, self.retained_modes, self.pseudoinverse_tolerance
         )
         selected = self.conditional_rank
-        available = min(selected, conditional_singular_values.size)
-        conditional_factor = np.zeros(
-            (self.unresolved_modes, selected),
-            dtype=float,
+        conditional_factor, conditional_singular_values = _truncate_residual_factor(
+            residual_factor, selected
         )
-        if available:
-            conditional_factor[:, :available] = (
-                conditional_vectors[:, :available]
-                * conditional_singular_values[:available][None, :]
-            )
+        retained_covariance = retained_factor @ retained_factor.T
+        conditional_covariance = residual_factor @ residual_factor.T
+        conditional_covariance = 0.5 * (conditional_covariance + conditional_covariance.T)
         conditional_variances = conditional_singular_values**2
         total_variance = float(np.sum(conditional_variances))
-        captured_variance = float(np.sum(conditional_variances[:available]))
+        captured_variance = float(np.sum(conditional_variances[:selected]))
         captured_fraction = (
             1.0 if total_variance <= 0.0 else captured_variance / total_variance
         )

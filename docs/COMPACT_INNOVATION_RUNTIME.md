@@ -1,9 +1,8 @@
 # Compact prepared innovation runtime
 
-`PreparedInnovationCompletion.from_config()` builds the innovation-conditioned
-Gaussian model and extracts the state required for repeated full-field draws.
-The prepared object stores the initial modal state, transition diagonal,
-reconstruction basis, and packed sampler. Existing
+`PreparedInnovationCompletion.from_config()` prepares the state required for
+repeated full-field draws. The prepared object stores the initial modal state,
+transition diagonal, reconstruction basis, and packed sampler. Existing
 `InnovationConditionedModalCompleter` instances can export the same state with
 `prepare_runtime()`, which shares their immutable packed sampler.
 
@@ -30,8 +29,9 @@ and a fixed duration of 100. The 101- and 201-node grids save 101 and 233
 full spatial fields, respectively. The workload matches the
 [joint batched innovation benchmark](JOINT_INNOVATION_BENCHMARK.md).
 
-- Four cold setup repeats alternate between the builder and the standalone
-  compact factory. The runner records builder construction, preparing the
+- Four cold setup repeats alternate between the builder and the original
+  compact factory, now named `from_full_history_config()`. The runner records
+  builder construction, preparing the
   builder's packed sampler, converting an already prepared builder, and the
   full standalone factory call. The factory constructs the full model
   temporarily, so construction still incurs that model's setup work and
@@ -106,16 +106,15 @@ runtime confidence interval spans parity. At 201 nodes the builder was about
 1.1% faster end to end, leaving the compact-versus-builder break-even estimates
 undefined.
 
-## Decision and next step
+## Constructor selection
 
 Use `PreparedInnovationCompletion.from_config()` for repeated trajectory
 sampling. Use `InnovationConditionedModalCompleter` when inspecting the
 conditioning diagnostics or completing externally generated retained paths.
 
-The compact runtime reduces steady-state storage. Its factory still incurs
-the full builder's setup cost and peak memory. The next step is to construct
-the packed factors by streaming transitions or applying the diffusion
-operator directly, so setup can avoid allocating the full histories.
+The default factory now streams transitions into the packed factors during
+setup. The original `from_full_history_config()` factory remains the reference
+for the [streaming constructor benchmark](STREAMING_INNOVATION_CONSTRUCTOR.md).
 
 ## Reproduction
 
