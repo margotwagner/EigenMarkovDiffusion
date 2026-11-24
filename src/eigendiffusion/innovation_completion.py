@@ -48,6 +48,35 @@ class InnovationConditioningStep:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedInnovationSampler:
+    """Joint innovation factors and draw layout for all saved-step transitions."""
+
+    joint_factors: FloatArray
+    selected_ranks: NDArray[np.intp]
+    latent_count: int
+    _active_columns: NDArray[np.bool_] | None
+
+    @property
+    def nbytes(self) -> int:
+        """Additional array storage used by the prepared sampler."""
+
+        mask_bytes = 0 if self._active_columns is None else self._active_columns.nbytes
+        return self.joint_factors.nbytes + self.selected_ranks.nbytes + mask_bytes
+
+    def draw_innovations(self, rng: np.random.Generator) -> FloatArray:
+        """Draw all joint innovations in stepwise retained-then-residual order."""
+
+        transitions, _, width = self.joint_factors.shape
+        draws = rng.standard_normal(self.latent_count)
+        if self._active_columns is None:
+            latent = draws.reshape(transitions, width)
+        else:
+            latent = np.zeros((transitions, width), dtype=float)
+            latent[self._active_columns] = draws
+        return np.einsum("tij,tj->ti", self.joint_factors, latent, optimize=False)
+
+
+@dataclass(frozen=True, slots=True)
 class InnovationConditionedCompletionResult:
     """A completed full-modal and full-spatial Gaussian trajectory."""
 
@@ -136,6 +165,7 @@ class InnovationConditionedModalCompleter:
             self._prepare_step(joint_factor)
             for joint_factor in self.full_reference._innovation_factors
         )
+        self._batched_sampler: PreparedInnovationSampler | None = None
 
     @property
     def conditioning_steps(self) -> tuple[InnovationConditioningStep, ...]:
@@ -204,24 +234,94 @@ class InnovationConditionedModalCompleter:
         With full conditional rank these reproduce
         :attr:`target_innovation_covariances` up to eigensolver round-off.  With
         a rank cap they expose exactly which residual variance is omitted.
+        Covariances are formed from the joint factor directly; expanding the
+        gain through ``G (R R.T) G.T`` is numerically unstable when ``G`` is
+        large and ``R`` is rank deficient.
         """
 
         result = np.empty_like(self._target_innovation_covariances)
-        retained = self.retained_modes
         for time_index, step in enumerate(self._conditioning_steps):
-            q_rr = step.retained_factor @ step.retained_factor.T
-            q_ru = q_rr @ step.conditional_gain.T
-            q_uu = (
-                step.conditional_gain @ q_rr @ step.conditional_gain.T
-                + step.sampled_conditional_covariance
+            joint_factor = np.zeros(
+                (
+                    self.config.n_nodes,
+                    self.retained_modes + step.selected_rank,
+                ),
+                dtype=float,
             )
-            result[time_index, :retained, :retained] = q_rr
-            result[time_index, :retained, retained:] = q_ru
-            result[time_index, retained:, :retained] = q_ru.T
-            result[time_index, retained:, retained:] = q_uu
+            self._populate_joint_factor(joint_factor, step)
+            result[time_index] = joint_factor @ joint_factor.T
         return result
 
     def run(
+        self,
+        rng: np.random.Generator | None = None,
+    ) -> InnovationConditionedCompletionResult:
+        """Sample a completed trajectory using prepared batched innovations.
+
+        Joint factors are prepared lazily on the first call and reused for
+        later trajectories.  :meth:`run_stepwise` remains the scalar-order
+        reference implementation.
+        """
+
+        return self.run_batched(rng)
+
+    def prepare_batched_sampler(self) -> PreparedInnovationSampler:
+        """Cache joint factors for repeated trajectory draws."""
+
+        if self._batched_sampler is None:
+            retained = self.retained_modes
+            steps = self._conditioning_steps
+            ranks = np.array([step.selected_rank for step in steps], dtype=np.intp)
+            widths = retained + ranks
+            max_width = int(widths.max())
+            joint = np.zeros((len(steps), self.config.n_nodes, max_width), dtype=float)
+            for factor, step, width in zip(joint, steps, widths):
+                self._populate_joint_factor(factor[:, :width], step)
+
+            active_columns = None
+            if np.any(widths != max_width):
+                active_columns = np.arange(max_width) < widths[:, None]
+                active_columns.setflags(write=False)
+            joint.setflags(write=False)
+            ranks.setflags(write=False)
+            self._batched_sampler = PreparedInnovationSampler(
+                joint_factors=joint,
+                selected_ranks=ranks,
+                latent_count=int(widths.sum()),
+                _active_columns=active_columns,
+            )
+        return self._batched_sampler
+
+    def run_batched(
+        self,
+        rng: np.random.Generator | None = None,
+    ) -> InnovationConditionedCompletionResult:
+        """Draw all innovations together and apply the diagonal state recurrence."""
+
+        generator = np.random.default_rng() if rng is None else rng
+        innovations = self.prepare_batched_sampler().draw_innovations(generator)
+        modal = np.empty((self.config.n_steps, self.config.n_nodes), dtype=float)
+        modal[0] = self._initial_modal
+        for time_index, innovation in enumerate(innovations):
+            modal[time_index + 1] = self._one_step_factors * modal[time_index] + innovation
+            modal[time_index + 1, 0] = self._initial_modal[0]
+        return self._result(modal)
+
+    def _populate_joint_factor(
+        self,
+        factor: FloatArray,
+        step: InnovationConditioningStep,
+    ) -> None:
+        """Fill one retained-plus-conditional innovation factor in place."""
+
+        retained = self.retained_modes
+        factor[:retained, :retained] = step.retained_factor
+        factor[retained:, :retained] = (
+            step.conditional_gain @ step.retained_factor
+        )
+        factor[retained:, retained:] = step.conditional_factor
+
+    def run_stepwise(
         self,
         rng: np.random.Generator | None = None,
     ) -> InnovationConditionedCompletionResult:
@@ -417,6 +517,18 @@ class InnovationConditionedModalCompleter:
         captured_fraction = (
             1.0 if total_variance <= 0.0 else captured_variance / total_variance
         )
+
+        # Batched preparation caches products of these arrays.  Make the
+        # public conditioning records truly immutable so the reference path
+        # and its cached packed representation cannot silently diverge.
+        for values in (
+            retained_covariance,
+            retained_factor,
+            gain,
+            conditional_covariance,
+            conditional_factor,
+        ):
+            values.setflags(write=False)
 
         return InnovationConditioningStep(
             retained_covariance=retained_covariance,

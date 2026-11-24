@@ -96,6 +96,7 @@ from .innovation_completion import (
     InnovationConditionedCompletionResult,
     InnovationConditionedModalCompleter,
     InnovationConditioningStep,
+    PreparedInnovationSampler,
 )
 from .correlated_modal import (
     BankedCorrelatedModalDiffusion,
@@ -277,6 +278,7 @@ __all__ = [
     "InnovationConditionedCompletionResult",
     "InnovationConditionedModalCompleter",
     "InnovationConditioningStep",
+    "PreparedInnovationSampler",
     "LocalPersistentUnresolvedGaussianCompleter",
     "MODAL_MODEL_NAMES",
     "ModeSelectionPolicy",

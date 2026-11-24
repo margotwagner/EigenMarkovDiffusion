@@ -323,7 +323,7 @@ def _benchmark_case(
     start = perf_counter()
     raw_fields = np.stack(
         [
-            completer.run(np.random.default_rng(sequence)).spatial_counts
+            completer.run_stepwise(np.random.default_rng(sequence)).spatial_counts
             for sequence in sequences
         ]
     )
@@ -379,7 +379,7 @@ def _benchmark_case(
             if method == EXACT_METHOD:
                 output = vectorized_multinomial_random_walk_diffusion(config, rng)
             else:
-                raw = completer.run(rng).spatial_counts
+                raw = completer.run_stepwise(rng).spatial_counts
                 output = (
                     simplex_bank_counts(raw, config.n_particles)
                     if method == SORTING_METHOD
@@ -413,7 +413,7 @@ def _benchmark_case(
                         config, rng
                     )
                 else:
-                    raw = completer.run(rng).spatial_counts
+                    raw = completer.run_stepwise(rng).spatial_counts
                     output = (
                         simplex_bank_counts(raw, config.n_particles)
                         if method == SORTING_METHOD

@@ -127,13 +127,17 @@ The next work should target the two costs that now dominate:
    readout time and made the prepared pipeline 54% and 38% faster than the
    exact vectorized walk at 101 and 201 nodes. See
    [Compiled exact simplex readout](COMPILED_SIMPLEX_READOUT.md).
-2. Prepack retained and conditional innovation factors so all transition
-   innovations can be sampled and applied in one batched contraction.
-3. Stream or apply the full innovation covariance as an operator and retain
-   only the selected gain/factor blocks. This should remove the prototype's
-   full-reference duplication and make setup/storage genuinely reduced-order.
-4. Re-run isolated RSS, amortization, and the physical-output accuracy gate.
-   Then extend scaling to larger one-dimensional grids before moving to 2D/3D.
+2. Joint factor packing is now complete. It reduces completion-only runtime by
+   67% and 53% at 101 and 201 nodes while preserving the stepwise Gaussian law
+   within floating roundoff. With the compiled exact readout, the prepared
+   pipeline is 5.30 and 3.14 times as fast as the exact vectorized walk. See
+   [Joint batched innovation sampling](JOINT_INNOVATION_BENCHMARK.md).
+3. The next implementation should stream or apply the full innovation
+   covariance as an operator and retain only the runtime gain/factor blocks.
+   This must remove the prototype's full-reference duplication and make
+   setup/storage genuinely reduced-order.
+4. Re-run isolated RSS, amortization, and the physical-output accuracy gate,
+   then extend scaling to larger one-dimensional grids before moving to 2D/3D.
 
 Reproduce the screens with:
 

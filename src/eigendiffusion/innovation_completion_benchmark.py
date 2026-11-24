@@ -96,6 +96,7 @@ def analytic_completion_diagnostics(
     reference = completer.full_reference
     exact_covariances = reference._modal_covariances
     target_innovations = completer._target_innovation_covariances
+    effective_innovations = completer.effective_innovation_covariances()
     diagonal = completer._one_step_factors
     vectors = completer.basis.eigenvectors
 
@@ -119,23 +120,7 @@ def analytic_completion_diagnostics(
     maximum_covariance_error = 0.0
     final_covariance_error = 0.0
 
-    for time_index, step in enumerate(completer._conditioning_steps):
-        q_rr = step.retained_factor @ step.retained_factor.T
-        q_ru = q_rr @ step.conditional_gain.T
-        sampled_conditional = (
-            step.conditional_factor @ step.conditional_factor.T
-        )
-        q_uu = (
-            step.conditional_gain @ q_rr @ step.conditional_gain.T
-            + sampled_conditional
-        )
-        retained = completer.retained_modes
-        effective = np.empty((config.n_nodes, config.n_nodes), dtype=float)
-        effective[:retained, :retained] = q_rr
-        effective[:retained, retained:] = q_ru
-        effective[retained:, :retained] = q_ru.T
-        effective[retained:, retained:] = q_uu
-
+    for time_index, effective in enumerate(effective_innovations):
         innovation_difference = effective - target_innovations[time_index]
         innovation_error_squared += float(np.sum(innovation_difference**2))
         innovation_reference_squared += float(
@@ -258,7 +243,7 @@ def _timed_action(
 ) -> np.ndarray:
     if method == EXACT_METHOD:
         return vectorized_multinomial_random_walk_diffusion(config, rng=rng)
-    result = completer.run(rng=rng)
+    result = completer.run_stepwise(rng=rng)
     if method == COMPLETED_RAW_METHOD:
         return result.spatial_counts
     if method == COMPLETED_SIMPLEX_METHOD:

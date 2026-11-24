@@ -198,7 +198,7 @@ def _end_to_end(
 ) -> np.ndarray:
     if method == EXACT_METHOD:
         return vectorized_multinomial_random_walk_diffusion(config, rng)
-    raw = completer.run(rng).spatial_counts
+    raw = completer.run_stepwise(rng).spatial_counts
     return _READOUTS[method](raw, config.n_particles)
 
 
@@ -221,7 +221,10 @@ def _benchmark_case(
     )
     start = perf_counter()
     raw_fields = np.stack(
-        [completer.run(np.random.default_rng(sequence)).spatial_counts for sequence in sequences]
+        [
+            completer.run_stepwise(np.random.default_rng(sequence)).spatial_counts
+            for sequence in sequences
+        ]
     )
     cache_generation_seconds = perf_counter() - start
     timing_rows: list[dict[str, object]] = []

@@ -420,7 +420,7 @@ def _accuracy_study(
         [spec.seed, case_index, 3]
     ).spawn(spec.accuracy_runs)
     for run_index, sequence in enumerate(sequences):
-        raw = completer.run(np.random.default_rng(sequence)).spatial_counts
+        raw = completer.run_stepwise(np.random.default_rng(sequence)).spatial_counts
         warm_runs[run_index] = warm_simplex_bank_counts(raw, config.n_particles)
         fast_clip_counts = clip_renormalize_bank_counts(
             raw,
@@ -844,7 +844,7 @@ def _run_method(
 ) -> np.ndarray:
     if method == EXACT_METHOD:
         return vectorized_multinomial_random_walk_diffusion(config, rng)
-    raw = completer.run(rng).spatial_counts
+    raw = completer.run_stepwise(rng).spatial_counts
     if method == WARM_METHOD:
         return warm_simplex_bank_counts(raw, config.n_particles)
     if method == CLIP_METHOD:
@@ -878,7 +878,7 @@ def _benchmark_case(
     ).spawn(spec.cached_trajectories)
     raw_fields = np.stack(
         [
-            completer.run(np.random.default_rng(sequence)).spatial_counts
+            completer.run_stepwise(np.random.default_rng(sequence)).spatial_counts
             for sequence in sequences
         ]
     )

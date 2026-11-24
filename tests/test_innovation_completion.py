@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -217,3 +219,128 @@ def test_conditional_rank_cap_and_no_unresolved_mode_edge_case():
             retained_modes=3,
             conditional_rank=0,
         )
+
+
+@pytest.mark.parametrize("retained, rank", [(3, None), (3, 1), (1, None), (7, None)])
+def test_batched_sampler_matches_stepwise_paths_and_innovation_covariance(retained, rank):
+    config = _config()
+    model = InnovationConditionedModalCompleter(
+        config, retained_modes=retained, conditional_rank=rank
+    )
+    reference_rng = np.random.default_rng(431)
+    expected = model.run_stepwise(reference_rng)
+    assert model._batched_sampler is None
+    batch_rng = np.random.default_rng(431)
+    actual = model.run_batched(batch_rng)
+
+    np.testing.assert_allclose(
+        actual.modal_amplitudes, expected.modal_amplitudes, rtol=0, atol=2e-11
+    )
+    np.testing.assert_allclose(actual.spatial_counts, expected.spatial_counts, rtol=0, atol=2e-11)
+    assert np.array_equal(actual.modal_amplitudes[:, 0], expected.modal_amplitudes[:, 0])
+    np.testing.assert_allclose(actual.spatial_counts.sum(axis=1), config.n_particles)
+    assert batch_rng.standard_normal() == reference_rng.standard_normal()
+
+    prepared = model.prepare_batched_sampler()
+    assert model.prepare_batched_sampler() is prepared
+    factors = prepared.joint_factors
+    np.testing.assert_allclose(
+        factors @ factors.transpose(0, 2, 1),
+        model.effective_innovation_covariances(),
+        rtol=0,
+        atol=2e-11,
+    )
+    assert prepared.latent_count == (config.n_steps - 1) * (retained + model.conditional_rank)
+    assert prepared.nbytes == factors.nbytes + prepared.selected_ranks.nbytes
+
+
+def test_batched_sampler_skips_padding_when_step_ranks_vary():
+    model = InnovationConditionedModalCompleter(_config(), retained_modes=3)
+    # Exercise the draw layout with a different residual rank at each step.
+    ranks = [0, 4, 1, 3, 2, 0, 4]
+    model._conditioning_steps = tuple(
+        replace(step, selected_rank=rank, conditional_factor=step.conditional_factor[:, :rank])
+        for step, rank in zip(model.conditioning_steps, ranks)
+    )
+    prepared = model.prepare_batched_sampler()
+    assert np.array_equal(prepared.selected_ranks, ranks)
+    assert prepared.latent_count == len(ranks) * model.retained_modes + sum(ranks)
+    assert prepared._active_columns is not None
+    assert prepared.nbytes == (
+        prepared.joint_factors.nbytes
+        + prepared.selected_ranks.nbytes
+        + prepared._active_columns.nbytes
+    )
+
+    reference_rng = np.random.default_rng(805)
+    expected = model.run_stepwise(reference_rng)
+    batch_rng = np.random.default_rng(805)
+    actual = model.run_batched(batch_rng)
+    np.testing.assert_allclose(
+        actual.modal_amplitudes, expected.modal_amplitudes, rtol=0, atol=2e-11
+    )
+    assert batch_rng.standard_normal() == reference_rng.standard_normal()
+
+
+def test_conditioning_arrays_are_immutable_after_batched_preparation():
+    model = InnovationConditionedModalCompleter(_config(), retained_modes=3)
+    model.prepare_batched_sampler()
+
+    with pytest.raises(ValueError, match="read-only"):
+        model.conditioning_steps[-1].conditional_factor[0, 0] = 0.0
+
+
+def test_run_uses_the_prepared_batched_path():
+    model = InnovationConditionedModalCompleter(_config(), retained_modes=3)
+
+    default = model.run(np.random.default_rng(37))
+    explicit = model.run_batched(np.random.default_rng(37))
+
+    assert model._batched_sampler is not None
+    assert np.array_equal(default.modal_amplitudes, explicit.modal_amplitudes)
+    assert np.array_equal(default.spatial_counts, explicit.spatial_counts)
+
+
+def test_batched_sampler_matches_stepwise_at_representative_dimension():
+    config = DiffusionConfig(
+        n_particles=5_275,
+        n_nodes=101,
+        n_steps=30,
+        impulse_index=59,
+        dt=1.0,
+        length=4.0,
+        diffusion_coefficient=2.2e-4,
+    )
+    model = InnovationConditionedModalCompleter(
+        config,
+        retained_modes=75,
+        conditional_rank=25,
+    )
+    reference_rng = np.random.default_rng(431)
+    expected = model.run_stepwise(reference_rng)
+    batch_rng = np.random.default_rng(431)
+    actual = model.run_batched(batch_rng)
+
+    np.testing.assert_allclose(
+        actual.modal_amplitudes,
+        expected.modal_amplitudes,
+        rtol=0.0,
+        atol=1.0e-8,
+    )
+    np.testing.assert_allclose(
+        actual.spatial_counts,
+        expected.spatial_counts,
+        rtol=0.0,
+        atol=1.0e-8,
+    )
+    sampler = model.prepare_batched_sampler()
+    packed_covariances = np.stack(
+        [factor @ factor.T for factor in sampler.joint_factors]
+    )
+    np.testing.assert_allclose(
+        model.effective_innovation_covariances(),
+        packed_covariances,
+        rtol=1.0e-13,
+        atol=1.0e-9,
+    )
+    assert batch_rng.standard_normal() == reference_rng.standard_normal()
