@@ -123,12 +123,17 @@ The next work should target the two costs that now dominate:
    slower than exact at 201 nodes and worsened marginal histogram divergence.
    See [Warm-started exact simplex readout](WARM_SIMPLEX_READOUT.md) and
    [Clip-and-renormalize residual feedback](CLIP_RENORMALIZE_READOUT.md).
-2. Stream or apply the full innovation covariance as an operator and retain
+   A compiled exact implementation subsequently removed 95--97% of warm
+   readout time and made the prepared pipeline 54% and 38% faster than the
+   exact vectorized walk at 101 and 201 nodes. See
+   [Compiled exact simplex readout](COMPILED_SIMPLEX_READOUT.md).
+2. Prepack retained and conditional innovation factors so all transition
+   innovations can be sampled and applied in one batched contraction.
+3. Stream or apply the full innovation covariance as an operator and retain
    only the selected gain/factor blocks. This should remove the prototype's
    full-reference duplication and make setup/storage genuinely reduced-order.
-3. Re-run isolated RSS, amortization, and a 500-trajectory physical-output
-   accuracy gate. Only after an end-to-end crossover should the method be
-   scaled to larger one-dimensional grids or moved to 2D/3D.
+4. Re-run isolated RSS, amortization, and the physical-output accuracy gate.
+   Then extend scaling to larger one-dimensional grids before moving to 2D/3D.
 
 Reproduce the screens with:
 

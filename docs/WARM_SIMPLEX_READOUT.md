@@ -78,6 +78,12 @@ but did not cross the exact comparator at 201 nodes and worsened marginal
 Jensen--Shannon divergence. See
 [Clip-and-renormalize residual feedback](CLIP_RENORMALIZE_READOUT.md).
 
+A later compiled implementation fused the same exact warm projection and
+residual recurrence into a guarded native loop. It removed 95--97% of
+this NumPy readout time and established a prepared-runtime crossover at both
+101 and 201 nodes without changing the projection law. See
+[Compiled exact simplex readout](COMPILED_SIMPLEX_READOUT.md).
+
 ## Reproduction
 
 ```bash

@@ -112,6 +112,12 @@ kernel's repeated row reductions and mass correction. If that cannot close
 the measured gap, stop this approximate-readout branch and return to making
 completion genuinely reduced-order.
 
+The subsequent compiled exact-simplex experiment supersedes this approximate
+branch for the main pipeline: it is faster on the tested fields, preserves the
+warm exact output to numerical tolerance, and crosses the exact-walk runtime at
+both resolutions. See
+[Compiled exact simplex readout](COMPILED_SIMPLEX_READOUT.md).
+
 ## Reproduction
 
 ```bash

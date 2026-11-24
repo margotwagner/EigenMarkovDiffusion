@@ -29,6 +29,7 @@ dynamics:
 - `raw`
 - `simplex_bank`
 - `warm_simplex_bank` (specialized exact counts/readout API)
+- `compiled_warm_simplex_bank` (optional compiled exact counts/readout API)
 - `clip_renormalize_bank` (specialized residual-feedback counts/readout API)
 - `delta_sigma_temporal`
 - `delta_sigma_neighbor`
@@ -45,6 +46,9 @@ physical-readout optimization and timing decision are documented in
 [Warm-started exact simplex readout](docs/WARM_SIMPLEX_READOUT.md).
 The subsequent approximate-readout experiment is documented in
 [Clip-and-renormalize residual feedback](docs/CLIP_RENORMALIZE_READOUT.md).
+The compiled exact kernel and first exact-readout path to clear the crossover
+gate at both resolutions are documented in
+[Compiled exact simplex readout](docs/COMPILED_SIMPLEX_READOUT.md).
 
 ## Installation
 
@@ -58,6 +62,9 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
+
+Install the optional compiled exact readout with
+`python -m pip install -e ".[compiled]"`.
 
 Confirm the installation:
 
@@ -140,6 +147,7 @@ The available workflows are:
 | `python -m eigendiffusion.innovation_completion_benchmark` | Screen low-rank conditional innovation completion |
 | `python -m eigendiffusion.warm_simplex_benchmark` | Compare warm-started and sorting-based exact simplex readouts |
 | `python -m eigendiffusion.clip_renormalize_benchmark` | Compare clip-and-renormalize feedback with the warm exact readout |
+| `python -m eigendiffusion.compiled_simplex_benchmark` | Compare the compiled exact readout with NumPy warm exact and the vectorized walk |
 | `study-operating-points` | Benchmark selected completed pipelines, peak RSS, and distribution error |
 | `study-structured-closure` | Select, validate, and scale the local persistent closure |
 | `study-fitted-closure` | Train and test a frozen trajectory-fitted sparse closure |

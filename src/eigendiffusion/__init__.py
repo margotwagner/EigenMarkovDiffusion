@@ -37,6 +37,16 @@ from .completion import (
     PersistentUnresolvedGaussianCompleter,
     UnresolvedGaussianCompleter,
 )
+from .compiled_simplex import (
+    CompiledSimplexDiagnostics,
+    CompiledSimplexResult,
+    compile_warm_simplex_kernel,
+    compiled_warm_simplex_available,
+    compiled_warm_simplex_bank_counts,
+    compiled_warm_simplex_bank_counts_with_diagnostics,
+    compiled_warm_simplex_bank_readout,
+    compiled_warm_simplex_disk_cache_enabled,
+)
 from .config import DiffusionConfig
 from .component_benchmark import (
     COMPONENT_BENCHMARK_REGIMES,
@@ -222,6 +232,8 @@ __all__ = [
     "CorrelatedModalDiffusion",
     "CorrelatedModalResult",
     "CompletionStep",
+    "CompiledSimplexDiagnostics",
+    "CompiledSimplexResult",
     "COMPONENT_BENCHMARK_REGIMES",
     "COMPONENT_READOUT_NAMES",
     "DETERMINISTIC_MARKOV_METHOD",
@@ -310,6 +322,12 @@ __all__ = [
     "build_full_field_component_pipeline",
     "continuous_expected_diffusion",
     "complete_fitted_ensemble",
+    "compile_warm_simplex_kernel",
+    "compiled_warm_simplex_available",
+    "compiled_warm_simplex_bank_counts",
+    "compiled_warm_simplex_bank_counts_with_diagnostics",
+    "compiled_warm_simplex_bank_readout",
+    "compiled_warm_simplex_disk_cache_enabled",
     "deterministic_diffusion",
     "deterministic_markov_diffusion",
     "deep_numpy_nbytes",
