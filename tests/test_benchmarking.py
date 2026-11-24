@@ -1,6 +1,9 @@
+import numpy as np
+
 from eigendiffusion import DiffusionConfig
 from eigendiffusion.benchmarking import (
     benchmark_random_walks,
+    deep_numpy_nbytes,
     estimate_random_walk_core_bytes,
 )
 
@@ -28,3 +31,15 @@ def test_benchmark_returns_both_methods_for_each_particle_count():
         (20, "multinomial"),
     }
     assert all(record.median_seconds >= 0.0 for record in records)
+
+
+def test_array_bytes_can_count_reachable_backings_once():
+    backing = np.arange(12, dtype=float)
+    first = backing[:2]
+    second = backing[-3:]
+
+    assert deep_numpy_nbytes((first, second)) == first.nbytes + second.nbytes
+    assert deep_numpy_nbytes(first, include_array_bases=True) == backing.nbytes
+    assert (
+        deep_numpy_nbytes((first, second, backing), include_array_bases=True) == backing.nbytes
+    )

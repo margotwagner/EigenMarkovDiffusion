@@ -260,12 +260,15 @@ class _RunPayload:
     retained_objects: tuple[object, ...]
 
 
-def deep_numpy_nbytes(value: object) -> int:
+def deep_numpy_nbytes(value: object, *, include_array_bases: bool = False) -> int:
     """Return unique NumPy array bytes reachable from ``value``.
 
     References are deduplicated by object identity, so a basis shared by a
-    simulator and result is counted once. This intentionally ignores Python
-    object overhead and temporary numerical workspaces.
+    simulator and result is counted once. With ``include_array_bases``, direct
+    NumPy-array base chains count their shared backing array once instead of
+    their logical sizes. Views backed through non-array wrappers retain their
+    logical-size accounting. This intentionally ignores Python object overhead
+    and temporary numerical workspaces.
     """
 
     seen_objects: set[int] = set()
@@ -278,6 +281,8 @@ def deep_numpy_nbytes(value: object) -> int:
         seen_objects.add(identity)
 
         if isinstance(item, np.ndarray):
+            if include_array_bases and isinstance(item.base, np.ndarray):
+                return visit(item.base)
             if identity in seen_arrays:
                 return 0
             seen_arrays.add(identity)

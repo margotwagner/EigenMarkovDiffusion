@@ -149,6 +149,7 @@ The available workflows are:
 | `python -m eigendiffusion.clip_renormalize_benchmark` | Compare clip-and-renormalize feedback with the warm exact readout |
 | `python -m eigendiffusion.compiled_simplex_benchmark` | Compare the compiled exact readout with NumPy warm exact and the vectorized walk |
 | `python -m eigendiffusion.joint_innovation_benchmark` | Compare stepwise and batched innovation sampling and the exact vectorized walk |
+| `python -m eigendiffusion.compact_runtime_benchmark` | Measure compact innovation runtime storage, setup, and full-field trajectory cost. [Protocol and results](docs/COMPACT_INNOVATION_RUNTIME.md) |
 | `study-operating-points` | Benchmark selected completed pipelines, peak RSS, and distribution error |
 | `study-structured-closure` | Select, validate, and scale the local persistent closure |
 | `study-fitted-closure` | Train and test a frozen trajectory-fitted sparse closure |

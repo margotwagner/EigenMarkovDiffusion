@@ -1,3 +1,5 @@
+import gc
+import weakref
 from dataclasses import replace
 
 import numpy as np
@@ -7,6 +9,7 @@ from eigendiffusion.config import DiffusionConfig
 from eigendiffusion.direct_modal import DirectModalGaussianDiffusion
 from eigendiffusion.innovation_completion import (
     InnovationConditionedModalCompleter,
+    PreparedInnovationCompletion,
 )
 
 
@@ -266,6 +269,7 @@ def test_batched_sampler_skips_padding_when_step_ranks_vary():
     assert np.array_equal(prepared.selected_ranks, ranks)
     assert prepared.latent_count == len(ranks) * model.retained_modes + sum(ranks)
     assert prepared._active_columns is not None
+    assert not prepared._active_columns.flags.writeable
     assert prepared.nbytes == (
         prepared.joint_factors.nbytes
         + prepared.selected_ranks.nbytes
@@ -279,7 +283,71 @@ def test_batched_sampler_skips_padding_when_step_ranks_vary():
     np.testing.assert_allclose(
         actual.modal_amplitudes, expected.modal_amplitudes, rtol=0, atol=2e-11
     )
-    assert batch_rng.standard_normal() == reference_rng.standard_normal()
+    next_draw = batch_rng.standard_normal()
+    assert next_draw == reference_rng.standard_normal()
+
+    compact = model.prepare_runtime()
+    compact_rng = np.random.default_rng(805)
+    compact_result = compact.run(compact_rng)
+    np.testing.assert_array_equal(compact_result.modal_amplitudes, actual.modal_amplitudes)
+    np.testing.assert_array_equal(compact_result.spatial_counts, actual.spatial_counts)
+    assert compact_rng.standard_normal() == next_draw
+    assert compact.nbytes == (
+        compact.initial_modal.nbytes
+        + compact.one_step_factors.nbytes
+        + compact.basis.eigenvalues.nbytes
+        + compact.basis.eigenvectors.nbytes
+        + prepared.nbytes
+    )
+
+
+@pytest.mark.parametrize("retained,rank", [(3, None), (3, 1), (1, None), (7, None)])
+def test_compact_runtime_factory_reproduces_batched_trajectories_and_rng(retained, rank):
+    config = _config(impulse_index=3)
+    settings = dict(retained_modes=retained, conditional_rank=rank)
+    model = InnovationConditionedModalCompleter(config, **settings)
+    compact = PreparedInnovationCompletion.from_config(config, **settings)
+    batch_rng = np.random.default_rng(431)
+    compact_rng = np.random.default_rng(431)
+    for _ in range(2):
+        expected = model.run_batched(batch_rng)
+        actual = compact.run(compact_rng)
+        np.testing.assert_array_equal(actual.modal_amplitudes, expected.modal_amplitudes)
+        np.testing.assert_array_equal(actual.spatial_counts, expected.spatial_counts)
+        assert actual.basis is compact.basis
+        assert actual.retained_modes == expected.retained_modes
+        assert compact_rng.bit_generator.state == batch_rng.bit_generator.state
+
+
+def test_compact_runtime_releases_setup_histories_and_keeps_owned_readonly_arrays():
+    model = InnovationConditionedModalCompleter(_config(), retained_modes=3)
+    expected = model.run_batched(np.random.default_rng(74))
+    compact = model.prepare_runtime()
+    assert model._initial_modal.base is None
+    assert compact.sampler is model.prepare_batched_sampler()
+    for original, copied in (
+        (model._initial_modal, compact.initial_modal),
+        (model._one_step_factors, compact.one_step_factors),
+        (model.basis.eigenvalues, compact.basis.eigenvalues),
+        (model.basis.eigenvectors, compact.basis.eigenvectors),
+    ):
+        assert copied.base is None
+        assert not np.shares_memory(copied, original)
+        assert not copied.flags.writeable
+    assert not compact.sampler.joint_factors.flags.writeable
+    assert not compact.sampler.selected_ranks.flags.writeable
+    references = [
+        weakref.ref(model),
+        weakref.ref(model.full_reference),
+        weakref.ref(model._target_innovation_covariances),
+        weakref.ref(model.conditioning_steps[0].conditional_factor),
+    ]
+    del model
+    gc.collect()
+    assert all(reference() is None for reference in references)
+    actual = compact.run(np.random.default_rng(74))
+    np.testing.assert_array_equal(actual.modal_amplitudes, expected.modal_amplitudes)
+    np.testing.assert_array_equal(actual.spatial_counts, expected.spatial_counts)
 
 
 def test_conditioning_arrays_are_immutable_after_batched_preparation():

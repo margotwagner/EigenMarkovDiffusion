@@ -75,6 +75,21 @@ class PreparedInnovationSampler:
             latent[self._active_columns] = draws
         return np.einsum("tij,tj->ti", self.joint_factors, latent, optimize=False)
 
+    def _draw_modal_path(
+        self,
+        initial_modal: FloatArray,
+        one_step_factors: FloatArray,
+        rng: np.random.Generator | None,
+    ) -> FloatArray:
+        generator = np.random.default_rng() if rng is None else rng
+        innovations = self.draw_innovations(generator)
+        modal = np.empty((len(innovations) + 1, initial_modal.size), dtype=float)
+        modal[0] = initial_modal
+        for time_index, innovation in enumerate(innovations):
+            modal[time_index + 1] = one_step_factors * modal[time_index] + innovation
+            modal[time_index + 1, 0] = initial_modal[0]
+        return modal
+
 
 @dataclass(frozen=True, slots=True)
 class InnovationConditionedCompletionResult:
@@ -97,6 +112,70 @@ class InnovationConditionedCompletionResult:
         """Conditionally generated unresolved coordinates."""
 
         return self.modal_amplitudes[:, self.retained_modes :]
+
+    @classmethod
+    def _from_modal(
+        cls, modal: FloatArray, basis: Eigenbasis, retained_modes: int
+    ) -> InnovationConditionedCompletionResult:
+        return cls(
+            modal_amplitudes=modal,
+            spatial_counts=modal @ basis.eigenvectors.T,
+            basis=basis,
+            retained_modes=retained_modes,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedInnovationCompletion:
+    """Runtime state for drawing full trajectories after conditioning setup."""
+
+    initial_modal: FloatArray
+    one_step_factors: FloatArray
+    basis: Eigenbasis
+    retained_modes: int
+    sampler: PreparedInnovationSampler
+
+    @staticmethod
+    def from_config(
+        config: DiffusionConfig,
+        *,
+        retained_modes: int,
+        conditional_rank: int | None = None,
+        pseudoinverse_tolerance: float = 1.0e-12,
+        psd_tolerance: float = 1.0e-10,
+    ) -> PreparedInnovationCompletion:
+        """Prepare a runtime using a temporary full conditioning model."""
+
+        builder = InnovationConditionedModalCompleter(
+            config,
+            retained_modes=retained_modes,
+            conditional_rank=conditional_rank,
+            pseudoinverse_tolerance=pseudoinverse_tolerance,
+            psd_tolerance=psd_tolerance,
+        )
+        return builder.prepare_runtime()
+
+    @property
+    def nbytes(self) -> int:
+        """Resident NumPy storage, including factors and their draw layout."""
+
+        return (
+            self.initial_modal.nbytes
+            + self.one_step_factors.nbytes
+            + self.basis.eigenvalues.nbytes
+            + self.basis.eigenvectors.nbytes
+            + self.sampler.nbytes
+        )
+
+    def run(
+        self, rng: np.random.Generator | None = None
+    ) -> InnovationConditionedCompletionResult:
+        """Draw a trajectory with the same latent order as the batched completer."""
+
+        modal = self.sampler._draw_modal_path(self.initial_modal, self.one_step_factors, rng)
+        return InnovationConditionedCompletionResult._from_modal(
+            modal, self.basis, self.retained_modes
+        )
 
 
 class InnovationConditionedModalCompleter:
@@ -157,7 +236,7 @@ class InnovationConditionedModalCompleter:
         )
         self.basis = self.full_reference.basis
         self._one_step_factors = self.full_reference.one_step_factors
-        self._initial_modal = self.full_reference.modal_means[0]
+        self._initial_modal = self.full_reference.modal_means[0].copy()
         self._target_innovation_covariances = (
             self.full_reference.innovation_covariances
         )
@@ -292,20 +371,37 @@ class InnovationConditionedModalCompleter:
             )
         return self._batched_sampler
 
+    def prepare_runtime(self) -> PreparedInnovationCompletion:
+        """Export standalone sampling state and share the read-only packed sampler."""
+
+        def frozen_copy(array: FloatArray) -> FloatArray:
+            owned = array.copy(order="K")
+            owned.setflags(write=False)
+            return owned
+
+        return PreparedInnovationCompletion(
+            initial_modal=frozen_copy(self._initial_modal),
+            one_step_factors=frozen_copy(self._one_step_factors),
+            basis=Eigenbasis(
+                eigenvalues=frozen_copy(self.basis.eigenvalues),
+                eigenvectors=frozen_copy(self.basis.eigenvectors),
+            ),
+            retained_modes=self.retained_modes,
+            sampler=self.prepare_batched_sampler(),
+        )
+
     def run_batched(
         self,
         rng: np.random.Generator | None = None,
     ) -> InnovationConditionedCompletionResult:
         """Draw all innovations together and apply the diagonal state recurrence."""
 
-        generator = np.random.default_rng() if rng is None else rng
-        innovations = self.prepare_batched_sampler().draw_innovations(generator)
-        modal = np.empty((self.config.n_steps, self.config.n_nodes), dtype=float)
-        modal[0] = self._initial_modal
-        for time_index, innovation in enumerate(innovations):
-            modal[time_index + 1] = self._one_step_factors * modal[time_index] + innovation
-            modal[time_index + 1, 0] = self._initial_modal[0]
-        return self._result(modal)
+        modal = self.prepare_batched_sampler()._draw_modal_path(
+            self._initial_modal, self._one_step_factors, rng
+        )
+        return InnovationConditionedCompletionResult._from_modal(
+            modal, self.basis, self.retained_modes
+        )
 
     def _populate_joint_factor(
         self,
@@ -364,7 +460,9 @@ class InnovationConditionedModalCompleter:
             )
             modal[time_index + 1, 0] = conserved_mass_mode
 
-        return self._result(modal)
+        return InnovationConditionedCompletionResult._from_modal(
+            modal, self.basis, self.retained_modes
+        )
 
     def complete(
         self,
@@ -425,15 +523,8 @@ class InnovationConditionedModalCompleter:
                 + unresolved_noise
             )
 
-        return self._result(modal)
-
-    def _result(self, modal: FloatArray) -> InnovationConditionedCompletionResult:
-        spatial = modal @ self.basis.eigenvectors.T
-        return InnovationConditionedCompletionResult(
-            modal_amplitudes=modal,
-            spatial_counts=spatial,
-            basis=self.basis,
-            retained_modes=self.retained_modes,
+        return InnovationConditionedCompletionResult._from_modal(
+            modal, self.basis, self.retained_modes
         )
 
     def _prepare_step(
