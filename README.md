@@ -9,6 +9,19 @@ The project is experimental: matching the mean is straightforward, while
 reproducing the full stochastic structure of a spatial particle process with a
 reduced modal model remains the central research question.
 
+The current model inventory, quantitative accuracy and performance tables,
+mathematical definitions, and open research problems are consolidated in the
+[November 24, 2026 project report](docs/PROJECT_REPORT_2026-11-24.md)
+([PDF](docs/PROJECT_REPORT_2026-11-24.pdf)).
+
+The [full-rank project report](docs/FULL_RANK_PROJECT_REPORT.md)
+([PDF](docs/FULL_RANK_PROJECT_REPORT.pdf)) covers the original models before
+mode truncation.
+
+The [reduced-mode project report](docs/REDUCED_MODE_PROJECT_REPORT.md)
+([PDF](docs/REDUCED_MODE_PROJECT_REPORT.pdf)) follows mode truncation from
+the first handoff experiments to the current prepared sampler.
+
 ## Models
 
 - `independent_modal` — the original EigenMarkov two-state model and default.
